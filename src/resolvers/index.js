@@ -352,27 +352,20 @@ const XHS_NOTE_ID = /\/(?:explore|discovery\/item|item|board)\/([0-9a-f]{16,})/i
 const XHS_SHORT_HOSTS = ['xhslink.com', 'xhslink.cn', 'xhslink.net'];
 
 // 小红书对机房 IP 段（含 Cloudflare 边缘）直接 302 到登录页，
-// 这里用其它出口的中转服务代抓，拿到同样的 SSR 页面再本地解析。
+// 这里借其它出口的中转服务代抓同一页面，再在本地解析 SSR 数据。
+// Google 翻译对同一目标地址会按语言对分别缓存，多开几个语言相当于多几次机会。
 const XHS_RELAYS = [
-  {
-    name: 'gt_auto',
-    build(url) {
-      const u = new URL(url);
-      const host = u.hostname.replace(/\./g, '-');
-      return `https://${host}.translate.goog${u.pathname}${u.search}${u.search ? '&' : '?'}_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en`;
-    },
-  },
-  {
-    name: 'gt_zh',
-    build(url) {
-      const u = new URL(url);
-      const host = u.hostname.replace(/\./g, '-');
-      return `https://${host}.translate.goog${u.pathname}${u.search}${u.search ? '&' : '?'}_x_tr_sl=zh-CN&_x_tr_tl=zh-CN&_x_tr_hl=zh-CN&_x_tr_hist=true`;
-    },
-  },
+  { name: 'gt_en', build: (url) => gtRelay(url, 'auto', 'en', 'en') },
+  { name: 'gt_tw', build: (url) => gtRelay(url, 'zh-CN', 'zh-TW', 'zh-TW') },
+  { name: 'gt_ja', build: (url) => gtRelay(url, 'auto', 'ja', 'ja') },
   { name: 'allorigins', build: (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` },
-  { name: 'codetabs', build: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
 ];
+
+function gtRelay(url, sl, tl, hl) {
+  const u = new URL(url);
+  const host = u.hostname.replace(/\./g, '-');
+  return `https://${host}.translate.goog${u.pathname}${u.search}${u.search ? '&' : '?'}_x_tr_sl=${sl}&_x_tr_tl=${tl}&_x_tr_hl=${hl}`;
+}
 
 function isXhsShortLink(url) {
   try {
@@ -560,7 +553,7 @@ export async function resolveXiaohongshu(input, env) {
     }
     for (const relay of XHS_RELAYS) {
       try {
-        push(relay.build(`${shareUrl(noteId)}${shareQuery}`), UA.desktop, relay.name, 'relay', 'follow', 12000);
+        push(relay.build(`${shareUrl(noteId)}${shareQuery}`), UA.desktop, relay.name, 'relay', 'follow', 9000);
       } catch {
         /* 忽略构造失败的转发通道 */
       }
