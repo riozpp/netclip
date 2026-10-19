@@ -173,6 +173,10 @@
           <p data-i18n="q3.a">优先确认链接是完整的分享链接（而不是 App 内的短文本）。若平台临时调整了接口，可稍后重试；服务端采用多级降级策略，通常几分钟内自动恢复。</p>
         </details>
         <details>
+          <summary>小红书链接为什么会被判定无效？</summary>
+          <p>小红书现在给每篇笔记加了访问凭证（xsec_token）校验，浏览器地址栏复制出来的 <code>xiaohongshu.com/explore/…</code> 链接，即使笔记是公开的也会被拒绝。请在小红书 App 里打开笔记，点「分享 → 复制链接」，粘贴以 <code>xhslink.cn</code> 或 <code>xhslink.com</code> 开头的短链，凭证会随链接一起提交。</p>
+        </details>
+        <details>
           <summary data-i18n="q4.q">下载的文件会经过你们的服务器吗？</summary>
           <p data-i18n="q4.a">下载请求经过边缘节点做一次流式转发，仅用于补全来源校验头、解决跨域与强制落盘，不落盘存储、不做内容分析。</p>
         </details>

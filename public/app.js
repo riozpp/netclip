@@ -312,9 +312,11 @@
 
     if (data.cover) {
       var coverBtn = el('a', 'dl alt');
-      coverBtn.href = proxyUrl(data.cover, safeName(data, 'cover'));
+      // 纯图文笔记里 cover 就是原图本身，叫「封面图」会让人以为是缩略图
+      var coverIsOriginal = (data.images || []).length > 0 && !(data.videos || []).length;
+      coverBtn.href = proxyUrl(data.cover, safeName(data, coverIsOriginal ? 'image' : 'cover'));
       coverBtn.appendChild(icon('image'));
-      coverBtn.appendChild(document.createTextNode(t('cover')));
+      coverBtn.appendChild(document.createTextNode(coverIsOriginal ? t('image') : t('cover')));
       row.appendChild(coverBtn);
     }
 
@@ -573,7 +575,7 @@
         var key = tab.getAttribute('data-platform');
         var map = {
           tiktok: 'Paste a TikTok link, e.g. https://www.tiktok.com/@user/video/7300000000000000000',
-          xiaohongshu: 'Paste a REDnote link, e.g. https://www.xiaohongshu.com/explore/xxxxxxxxxxxxxxxx',
+          xiaohongshu: 'Paste the REDnote app share link, e.g. https://xhslink.cn/o/xxxxxxx (browser URL will not work)',
           douyin: 'Paste a Douyin link, e.g. https://v.douyin.com/xxxxxxx/',
           bilibili: 'Paste a Bilibili link, e.g. https://www.bilibili.com/video/BV1xx411c7mD',
           instagram: 'Paste an Instagram link, e.g. https://www.instagram.com/p/xxxxxxx/'

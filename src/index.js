@@ -98,7 +98,7 @@ export default {
       }
     } catch (err) {
       if (err instanceof ParseError) {
-        return json({ ok: false, error: { code: err.code, message: err.message } }, err.status);
+        return json({ ok: false, error: { code: err.code, message: err.message, detail: err.detail } }, err.status);
       }
       return json({ ok: false, error: { code: 'internal_error', message: String(err?.message || err) } }, 500);
     }
@@ -158,6 +158,7 @@ async function handleParse(request, env, url) {
           error: {
             code: err instanceof ParseError ? err.code : 'parse_failed',
             message: err?.message || '解析失败',
+            detail: err?.detail,
           },
         };
       }

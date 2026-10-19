@@ -348,68 +348,311 @@ export async function resolveTikTok(input, env) {
   throw last || new ParseError('TikTok 解析失败，请稍后重试', 'tiktok_unavailable');
 }
 
-export async function resolveXiaohongshu(input) {
-  const target = input;
-  const idMatch = target.match(/\/(?:explore|discovery\/item|item)\/([0-9a-f]{16,})/i) || target.match(/noteId=([0-9a-f]{16,})/i);
-  const noteId = idMatch ? idMatch[1] : '';
-  const url = noteId ? `https://www.xiaohongshu.com/explore/${noteId}` : target;
+const XHS_NOTE_ID = /\/(?:explore|discovery\/item|item|board)\/([0-9a-f]{16,})/i;
+const XHS_SHORT_HOSTS = ['xhslink.com', 'xhslink.cn', 'xhslink.net'];
 
-  const html = await requestText(url, {
-    headers: { referer: 'https://www.xiaohongshu.com/', 'user-agent': UA.desktop },
-  });
-  const state = extractJsonObject(html, ['window.__INITIAL_STATE__']);
-  const detail = state?.note?.noteDetailMap || {};
-  const key = noteId && detail[noteId] ? noteId : Object.keys(detail)[0];
-  const note = key ? detail[key]?.note : null;
-  if (!note) throw new ParseError('小红书笔记不存在，或需要登录态才能访问', 'not_found', 404);
+// 小红书对机房 IP 段（含 Cloudflare 边缘）直接 302 到登录页，
+// 这里用其它出口的中转服务代抓，拿到同样的 SSR 页面再本地解析。
+const XHS_RELAYS = [
+  {
+    name: 'gt_auto',
+    build(url) {
+      const u = new URL(url);
+      const host = u.hostname.replace(/\./g, '-');
+      return `https://${host}.translate.goog${u.pathname}${u.search}${u.search ? '&' : '?'}_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en`;
+    },
+  },
+  {
+    name: 'gt_zh',
+    build(url) {
+      const u = new URL(url);
+      const host = u.hostname.replace(/\./g, '-');
+      return `https://${host}.translate.goog${u.pathname}${u.search}${u.search ? '&' : '?'}_x_tr_sl=zh-CN&_x_tr_tl=zh-CN&_x_tr_hl=zh-CN&_x_tr_hist=true`;
+    },
+  },
+  { name: 'allorigins', build: (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` },
+  { name: 'codetabs', build: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
+];
 
-  const videos = [];
-  const stream = note.video?.media?.stream || {};
-  for (const codec of ['h264', 'h265', 'av1']) {
-    const list = stream[codec];
-    if (Array.isArray(list) && list[0]?.masterUrl) {
-      videos.push({ label: codec === 'h264' ? '无水印视频' : `无水印视频 · ${codec.toUpperCase()}`, url: list[0].masterUrl, ext: 'mp4', quality: codec });
-      break;
+function isXhsShortLink(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return XHS_SHORT_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}
+
+function readXsecToken(url) {
+  try {
+    return new URL(url).searchParams.get('xsec_token') || '';
+  } catch {
+    return '';
+  }
+}
+
+// 小红书从 2025 年起对笔记强制 xsec_token 校验：没有 token 的 explore 链接一律 307 到 404 页。
+// token 只存在于 App「分享 → 复制链接」得到的短链里，所以短链必须逐跳展开并把 token 带走。
+async function expandXhsShortLink(input) {
+  let current = input;
+  for (let hop = 0; hop < 5; hop += 1) {
+    const res = await request(current, {
+      redirect: 'manual',
+      headers: { referer: 'https://www.xiaohongshu.com/', 'user-agent': UA.ios },
+      timeout: 12000,
+    });
+    const location = res.headers.get('location');
+    if (!location) break;
+    const next = new URL(location, current).toString();
+    if (XHS_NOTE_ID.test(next) || /xsec_token=/.test(next)) return next;
+    // 登录墙会把原始链接塞进 redirectPath，URL 解码后仍可取到 noteId 与 token
+    if (next.includes('redirectPath=')) {
+      const decoded = decodeURIComponent(next);
+      if (XHS_NOTE_ID.test(decoded) || /xsec_token=/.test(decoded)) return decoded;
     }
+    current = next;
+  }
+  return current;
+}
+
+// 小红书互动数返回的是 "1.2万" / "3.4亿" 这类带单位的字符串，直接抽数字会差四个数量级
+function parseCount(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 0;
+  const m = raw.match(/([\d.]+)\s*(万|亿|w|W)?/);
+  if (!m) return 0;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return 0;
+  const unit = m[2];
+  if (unit === '万' || unit === 'w' || unit === 'W') return Math.round(n * 10000);
+  if (unit === '亿') return Math.round(n * 100000000);
+  return Math.round(n);
+}
+
+export function normalizeXhsNote(note, noteId) {
+  const stream = note.video?.media?.stream || note.video?.stream || {};
+  const videos = [];
+  const seen = new Set();
+
+  const pushVideo = (rawUrl, codec, item) => {
+    let url = String(rawUrl || '').trim();
+    if (!url || seen.has(url)) return;
+    if (url.startsWith('http://')) url = 'https://' + url.slice(7);
+    seen.add(url);
+    const label = codec === 'h264' ? '无水印视频' : `无水印视频 · ${codec.toUpperCase()}`;
+    const size = toNumber(item?.size);
+    videos.push({
+      label: size ? `${label} · ${(size / 1048576).toFixed(1)}MB` : label,
+      url,
+      ext: 'mp4',
+      quality: codec,
+    });
+  };
+
+  for (const codec of ['h264', 'h265', 'av1', 'h266']) {
+    const list = stream[codec];
+    if (!Array.isArray(list) || !list.length) continue;
+    const item = list.find((v) => v?.masterUrl) || list[0];
+    pushVideo(item?.masterUrl || item?.backupUrls?.[0], codec, item);
   }
   if (!videos.length && note.video?.consumer?.originVideoKey) {
-    videos.push({
-      label: '无水印视频',
-      url: `https://sns-video-bd.xhscdn.com/${note.video.consumer.originVideoKey}`,
-      ext: 'mp4',
-      quality: 'origin',
-    });
+    pushVideo(`https://sns-video-bd.xhscdn.com/${note.video.consumer.originVideoKey}`, 'h264');
   }
 
   const images = (note.imageList || [])
-    .map((img) => pick(img.urlDefault, img.urlPre, img.infoList?.[0]?.url))
+    .map((img) => {
+      const list = img.infoList || [];
+      const preferred =
+        list.find((i) => i?.imageScene === 'H5_DTL') ||
+        list.find((i) => i?.imageScene === 'WB_DFT') ||
+        list[0];
+      let url = pick(preferred?.url, img.urlDefault, img.urlPre, img.url);
+      if (!url && img.fileId) url = `https://sns-img-bd.xhscdn.com/${img.fileId}`;
+      return String(url || '').replace(/^http:\/\//, 'https://');
+    })
     .filter(Boolean);
+
+  const title = String(note.title || '').trim();
+  const desc = String(note.desc || '').trim();
+  const fallbackTitle = desc.split('\n')[0].slice(0, 60) || '小红书笔记';
+  const videoItems = stream.h264 || stream.h265 || stream.av1 || [];
+  // capa.duration 是秒，stream[].duration 是毫秒，两者不能混着直接取
+  const capaDuration = toNumber(note.video?.capa?.duration);
+  const streamDuration = toNumber(videoItems[0]?.duration);
+  let duration = 0;
+  if (capaDuration > 0) duration = Math.round(capaDuration);
+  else if (streamDuration > 1000) duration = Math.round(streamDuration / 1000);
+  else if (streamDuration > 0) duration = Math.round(streamDuration);
+
+  const isVideo = note.type === 'video' || videos.length > 0;
 
   return {
     platform: 'xiaohongshu',
     platformName: '小红书',
-    id: noteId,
-    type: videos.length ? (images.length ? 'mixed' : 'video') : 'image',
-    title: pick(note.title, note.desc, '小红书笔记'),
-    desc: pick(note.desc, ''),
-    cover: pick(images[0], note.video?.image?.firstFrameFileid, ''),
-    duration: 0,
+    id: noteId || note.noteId || '',
+    type: isVideo ? (images.length > 1 ? 'mixed' : 'video') : 'image',
+    title: pick(title, fallbackTitle),
+    desc,
+    cover: pick(images[0], ''),
+    duration,
     author: {
-      name: pick(note.user?.nickname, '小红书用户'),
+      name: pick(note.user?.nickName, note.user?.nickname, '小红书用户'),
       id: pick(note.user?.userId, ''),
-      avatar: pick(note.user?.avatar, ''),
+      avatar: String(pick(note.user?.avatar, '')).replace(/^http:\/\//, 'https://'),
     },
     stats: {
       play: 0,
-      like: toNumber(String(pick(note.interactInfo?.likedCount, '0')).replace(/\D/g, '')),
-      comment: toNumber(String(pick(note.interactInfo?.commentCount, '0')).replace(/\D/g, '')),
-      share: toNumber(String(pick(note.interactInfo?.shareCount, '0')).replace(/\D/g, '')),
+      like: parseCount(note.interactInfo?.likedCount),
+      comment: parseCount(note.interactInfo?.commentCount),
+      share: parseCount(note.interactInfo?.shareCount),
     },
     videos,
     images,
     music: null,
-    sourceUrl: url,
+    sourceUrl: noteId ? `https://www.xiaohongshu.com/explore/${noteId}` : '',
   };
+}
+
+export async function resolveXiaohongshu(input, env) {
+  let target = input;
+  let noteId = (target.match(XHS_NOTE_ID) || [])[1] || '';
+  let token = readXsecToken(target);
+  const trace = [];
+
+  if (!noteId || !token) {
+    try {
+      const expanded = await expandXhsShortLink(target);
+      if (expanded !== target) {
+        target = expanded;
+        if (!noteId) noteId = (target.match(XHS_NOTE_ID) || [])[1] || '';
+        if (!token) token = readXsecToken(target);
+      }
+      trace.push(`expand:${noteId ? 'id' : 'noid'}/${token ? 'token' : 'notoken'}`);
+    } catch (err) {
+      trace.push(`expand_err:${err?.code || err?.name || 'unknown'}`);
+    }
+  }
+
+  if (!noteId) {
+    throw new ParseError(
+      '未能识别小红书笔记 ID，请用 App 里的「分享 → 复制链接」重新获取',
+      'bad_url',
+      400,
+      trace.join('|') || 'no_note_id',
+    );
+  }
+
+  const cacheKey = `xhs:${noteId}`;
+  const cached = await cacheRead(cacheKey);
+  if (cached) return cached;
+
+  const attempts = [];
+  const push = (url, ua, tag, group, redirect = 'manual', timeout = 12000) =>
+    attempts.push({ url, ua, tag, group, redirect, timeout });
+  const shareUrl = (id) => `https://www.xiaohongshu.com/discovery/item/${id}`;
+  const shareQuery = token ? `?xsec_token=${encodeURIComponent(token)}&xsec_source=app_share` : '';
+
+  // 直连只在住宅/本机出口有效，机房 IP 必被 302，所以只试一次，失败就把并发交给转发通道。
+  push(`${shareUrl(noteId)}${shareQuery}`, UA.spider, 'direct', 'direct', 'manual', 7000);
+  if (token) {
+    if (env?.XHS_PROXY) {
+      push(`${env.XHS_PROXY}${encodeURIComponent(`${shareUrl(noteId)}${shareQuery}`)}`, UA.desktop, 'own_proxy', 'relay', 'follow', 12000);
+    }
+    for (const relay of XHS_RELAYS) {
+      try {
+        push(relay.build(`${shareUrl(noteId)}${shareQuery}`), UA.desktop, relay.name, 'relay', 'follow', 12000);
+      } catch {
+        /* 忽略构造失败的转发通道 */
+      }
+    }
+  }
+  // 无 token 的直连只作为兜底：多数情况会 307 到 404，但部分老笔记仍可访问
+  push(`https://www.xiaohongshu.com/explore/${noteId}`, UA.spider, 'expl_bare', 'last', 'manual', 7000);
+
+  const finish = async (result) => {
+    // 图片直链是按时段签名的，缓存时间要短于签名有效期
+    await cacheWrite(cacheKey, result, 240);
+    return result;
+  };
+
+  const runAttempt = async (attempt) => {
+    let res;
+    try {
+      res = await request(attempt.url, {
+        redirect: attempt.redirect,
+        headers: { referer: 'https://www.xiaohongshu.com/', 'user-agent': attempt.ua },
+        timeout: attempt.timeout,
+      });
+    } catch (err) {
+      trace.push(`${attempt.tag}:err_${err?.code || err?.name || 'x'}`);
+      return null;
+    }
+    if (res.status !== 200) {
+      trace.push(`${attempt.tag}:${res.status}`);
+      return null;
+    }
+
+    const html = await res.text();
+    const state = extractJsonObject(html, ['window.__INITIAL_STATE__']);
+    if (!state) {
+      trace.push(`${attempt.tag}:200/no_state/len${html.length}`);
+      return null;
+    }
+    const detailMap = state?.note?.noteDetailMap || {};
+    const note =
+      state?.noteData?.data?.noteData ||
+      detailMap[noteId]?.note ||
+      Object.values(detailMap).map((v) => v?.note).find(Boolean) ||
+      null;
+    if (!note) {
+      trace.push(`${attempt.tag}:200/no_note/${Object.keys(state).slice(0, 5).join('+')}`);
+      return null;
+    }
+
+    const result = normalizeXhsNote(note, noteId);
+    if (!result.videos.length && !result.images.length) {
+      trace.push(`${attempt.tag}:200/empty_media`);
+      return null;
+    }
+    return result;
+  };
+
+  for (const attempt of attempts.filter((a) => a.group === 'direct')) {
+    const result = await runAttempt(attempt);
+    if (result) return finish(result);
+  }
+
+  // 转发通道并发跑，谁先拿到数据用谁，避免一个个超时叠加把请求拖到几十秒
+  const relays = attempts.filter((a) => a.group === 'relay');
+  if (relays.length) {
+    try {
+      const result = await Promise.any(
+        relays.map((a) =>
+          runAttempt(a).then((value) => {
+            if (!value) throw new Error('miss');
+            return value;
+          }),
+        ),
+      );
+      if (result) return finish(result);
+    } catch {
+      /* 全部通道失败，落到下面的兜底与报错 */
+    }
+  }
+
+  for (const attempt of attempts.filter((a) => a.group === 'last')) {
+    const result = await runAttempt(attempt);
+    if (result) return finish(result);
+  }
+
+  throw new ParseError(
+    token
+      ? '小红书拒绝了这次请求，链接可能已过期，请在 App 里重新「分享 → 复制链接」'
+      : '该小红书链接缺少访问凭证（xsec_token），请在 App 里用「分享 → 复制链接」重新获取',
+    'xhs_need_token',
+    422,
+    trace.join('|') || 'no_attempt',
+  );
 }
 
 function biliCookie() {
@@ -568,7 +811,7 @@ export async function resolveInstagram(input) {
 export const PLATFORMS = [
   { key: 'douyin', name: '抖音', hosts: ['douyin.com', 'iesdouyin.com'], color: '#000000' },
   { key: 'tiktok', name: 'TikTok', hosts: ['tiktok.com'], color: '#25F4EE' },
-  { key: 'xiaohongshu', name: '小红书', hosts: ['xiaohongshu.com', 'xhslink.com'], color: '#FF2442' },
+  { key: 'xiaohongshu', name: '小红书', hosts: ['xiaohongshu.com', 'rednote.com', 'xhslink.com', 'xhslink.cn', 'xhslink.net'], color: '#FF2442' },
   { key: 'bilibili', name: '哔哩哔哩', hosts: ['bilibili.com', 'b23.tv'], color: '#FB7299' },
   { key: 'instagram', name: 'Instagram', hosts: ['instagram.com', 'instagr.am'], color: '#E1306C' },
 ];

@@ -2,14 +2,19 @@ const UA_IOS =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const UA_DESKTOP =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+// 内容平台普遍对搜索引擎蜘蛛单独放行（用于生成搜索结果与分享卡片），
+// 这是普通 UA 被登录墙拦下时唯一还能拿到 SSR 数据的通道。
+const UA_SPIDER =
+  'Mozilla/5.0 (Linux; Android 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36 (compatible; Bytespider; spider-feedback@bytedance.com)';
 
-export const UA = { ios: UA_IOS, desktop: UA_DESKTOP };
+export const UA = { ios: UA_IOS, desktop: UA_DESKTOP, spider: UA_SPIDER };
 
 export class ParseError extends Error {
-  constructor(message, code = 'parse_failed', status = 422) {
+  constructor(message, code = 'parse_failed', status = 422, detail) {
     super(message);
     this.code = code;
     this.status = status;
+    if (detail) this.detail = detail;
   }
 }
 
