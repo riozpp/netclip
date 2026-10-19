@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page="home">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>净影 NetClip · 短视频无水印解析下载（抖音 / TikTok / 小红书 / B站）</title>
+<meta name="description" content="粘贴分享链接即可解析并下载抖音、TikTok、小红书、哔哩哔哩等平台的视频、图文与实况照片，去除水印、保留原画质，无需登录，支持批量。" />
+<meta name="theme-color" content="#fe2c55" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="/styles.css" />
+<link rel="canonical" href="/" />
+<meta property="og:title" content="净影 NetClip · 短视频无水印解析下载" />
+<meta property="og:description" content="支持抖音 / TikTok / 小红书 / 哔哩哔哩，粘贴链接即可解析下载，无需登录，支持批量。" />
+<meta property="og:type" content="website" />
+<script defer src="/app.js"></script>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="/">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5v-11Z" stroke="currentColor" stroke-width="1.6"/><path d="M10 9.2l5 2.8-5 2.8V9.2Z" fill="currentColor"/></svg>
+      </span>
+      <span>净影 <span style="color:var(--muted);font-weight:600">NetClip</span></span>
+    </a>
+    <nav class="nav">
+      <a href="#parse" data-i18n="nav.parse">解析下载</a>
+      <a href="#features" data-i18n="nav.features">功能特性</a>
+      <a href="#how" data-i18n="nav.how">如何使用</a>
+      <a href="#faq" data-i18n="nav.faq">常见问题</a>
+    </nav>
+    <div class="header-right">
+      <div class="lang-switch" role="group" aria-label="语言">
+        <button type="button" data-lang="zh" aria-pressed="true">中文</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      </div>
+      <a class="btn btn-primary btn-sm" href="#parse" data-i18n="nav.cta">开始解析</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="hero" id="parse">
+    <div class="wrap hero-inner">
+      <span class="pill"><span class="dot"></span><span data-i18n="hero.pill">无需登录 · 每小时 60 次免费解析</span></span>
+      <h1 data-i18n-html="hero.title">粘贴一条链接，<br /><span class="grad">带走无水印原片</span></h1>
+      <p class="lede" data-i18n="hero.lede">支持抖音、TikTok、小红书、哔哩哔哩等平台的视频、图文与实况照片。粘贴分享链接即可解析，下载得到的文件保持平台原始画质。</p>
+
+      <form class="parser" id="parse-form" novalidate>
+        <label for="url-input" data-i18n="form.label">粘贴分享链接</label>
+        <div class="field">
+          <textarea id="url-input" name="url" rows="3" spellcheck="false"
+            placeholder="例如：https://v.douyin.com/xxxxxxx/  或  https://www.tiktok.com/@user/video/7300000000000000000"
+            data-i18n-placeholder="form.placeholder"></textarea>
+        </div>
+        <div class="parser-actions">
+          <button class="btn btn-primary grow" type="submit" id="submit-btn" data-i18n="form.submit">开始解析</button>
+          <button class="btn btn-ghost" type="button" id="paste-btn" data-i18n="form.paste">读取剪贴板</button>
+          <button class="btn btn-ghost" type="button" id="clear-btn" data-i18n="form.clear">清空</button>
+          <span class="hint" data-i18n="form.hint">支持批量，每行一条，单次最多 6 条</span>
+        </div>
+        <div class="chips" id="platform-chips" aria-label="支持的平台"></div>
+      </form>
+
+      <div class="results" id="results" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <section class="block" id="features">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow" data-i18n="features.eyebrow">WHY NETCLIP</div>
+        <h2 data-i18n="features.title">为什么选择净影</h2>
+        <p class="section-sub" data-i18n="features.sub">把「解析」这件事做得更直白：不注册、不装插件、不压缩画质。</p>
+      </div>
+      <div class="grid-4">
+        <article class="feature">
+          <div class="f-icon" style="background:linear-gradient(135deg,#fff1f4,#ffe4ea)">🆓</div>
+          <h3 data-i18n="f1.t">免费不限次</h3>
+          <p data-i18n="f1.d">单次调用零成本，日常使用额度充足，不设付费墙。</p>
+        </article>
+        <article class="feature">
+          <div class="f-icon" style="background:linear-gradient(135deg,#f0f0ff,#e6e2ff)">🔓</div>
+          <h3 data-i18n="f2.t">无需注册登录</h3>
+          <p data-i18n="f2.d">打开即用，不收集账号信息，不要求授权任何平台账号。</p>
+        </article>
+        <article class="feature">
+          <div class="f-icon" style="background:linear-gradient(135deg,#eafcfa,#d8f7f4)">🪄</div>
+          <h3 data-i18n="f3.t">无损去水印</h3>
+          <p data-i18n="f3.d">直接取用平台原始码流，不做二次转码，画质不衰减。</p>
+        </article>
+        <article class="feature">
+          <div class="f-icon" style="background:linear-gradient(135deg,#fff8e6,#ffefc9)">⚡</div>
+          <h3 data-i18n="f4.t">边缘节点解析</h3>
+          <p data-i18n="f4.d">解析逻辑跑在全球边缘网络上，常规请求 1 秒内返回结果。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="how" style="background:var(--bg-soft);border-block:1px solid var(--line)">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow" data-i18n="how.eyebrow">HOW IT WORKS</div>
+        <h2 data-i18n="how.title">四步拿到原片</h2>
+        <p class="section-sub" data-i18n="how.sub">整个过程不需要安装任何软件。</p>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <h3 data-i18n="s1.t">复制链接</h3>
+          <p data-i18n="s1.d">在目标 App 里点「分享」，选择「复制链接」。</p>
+        </div>
+        <div class="step">
+          <h3 data-i18n="s2.t">粘贴解析</h3>
+          <p data-i18n="s2.d">把链接贴进上方输入框，点击「开始解析」。</p>
+        </div>
+        <div class="step">
+          <h3 data-i18n="s3.t">预览确认</h3>
+          <p data-i18n="s3.d">核对封面、作者与标题，选择需要的清晰度。</p>
+        </div>
+        <div class="step">
+          <h3 data-i18n="s4.t">一键保存</h3>
+          <p data-i18n="s4.d">点击下载按钮，文件直接落盘到你的设备。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow" data-i18n="types.eyebrow">CONTENT TYPES</div>
+        <h2 data-i18n="types.title">支持的内容类型</h2>
+      </div>
+      <div class="grid-3">
+        <article class="feature">
+          <div class="f-icon">🎬</div>
+          <h3 data-i18n="t1.t">视频无水印下载</h3>
+          <p data-i18n="t1.d">短视频、长视频均返回原始分辨率的 MP4，附带原声音频单独下载。</p>
+        </article>
+        <article class="feature">
+          <div class="f-icon">🖼️</div>
+          <h3 data-i18n="t2.t">图文与实况照片</h3>
+          <p data-i18n="t2.d">图文笔记逐张给出原图，实况照片保留动态片段。</p>
+        </article>
+        <article class="feature">
+          <div class="f-icon">📦</div>
+          <h3 data-i18n="t3.t">多链接批量</h3>
+          <p data-i18n="t3.d">一次粘贴多条链接，按顺序解析，结果分卡片呈现。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="faq">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow" data-i18n="faq.eyebrow">FAQ</div>
+        <h2 data-i18n="faq.title">常见问题</h2>
+      </div>
+      <div class="faq">
+        <details open>
+          <summary data-i18n="q1.q">这个服务收费吗？</summary>
+          <p data-i18n="q1.a">不收费。当前版本对每个 IP 每小时提供 60 次解析额度，足够日常使用；额度按滑动窗口自动恢复，不需要付费解锁。</p>
+        </details>
+        <details>
+          <summary data-i18n="q2.q">支持哪些平台？</summary>
+          <p data-i18n="q2.a">已支持抖音、TikTok、小红书、哔哩哔哩与 Instagram 的公开内容。需要登录态才能访问的私密内容、付费内容不在支持范围内。</p>
+        </details>
+        <details>
+          <summary data-i18n="q3.q">解析失败了怎么办？</summary>
+          <p data-i18n="q3.a">优先确认链接是完整的分享链接（而不是 App 内的短文本）。若平台临时调整了接口，可稍后重试；服务端采用多级降级策略，通常几分钟内自动恢复。</p>
+        </details>
+        <details>
+          <summary data-i18n="q4.q">下载的文件会经过你们的服务器吗？</summary>
+          <p data-i18n="q4.a">下载请求经过边缘节点做一次流式转发，仅用于补全来源校验头、解决跨域与强制落盘，不落盘存储、不做内容分析。</p>
+        </details>
+        <details>
+          <summary data-i18n="q5.q">可以用来做什么？</summary>
+          <p data-i18n="q5.a">请仅下载你拥有版权或已获授权的内容，用于个人备份、二次创作素材整理等场景。转载、商用前请自行取得权利人许可。</p>
+        </details>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div>
+        <a class="brand" href="/" style="margin-bottom:10px">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M10 9.2l5 2.8-5 2.8V9.2Z" fill="currentColor"/></svg>
+          </span>
+          <span>净影 NetClip</span>
+        </a>
+        <p data-i18n="footer.desc">开源的多平台媒体解析工具，运行在 Cloudflare 边缘网络。</p>
+      </div>
+      <div>
+        <h4 data-i18n="footer.product">产品</h4>
+        <a href="#parse" data-i18n="nav.parse">解析下载</a>
+        <a href="#features" data-i18n="nav.features">功能特性</a>
+        <a href="/kuku.html">NetClip Pro</a>
+        <a href="/api/health">服务状态</a>
+      </div>
+      <div>
+        <h4 data-i18n="footer.legal">说明</h4>
+        <a href="/docs/terms.html" data-i18n="footer.terms">使用条款</a>
+        <a href="/docs/privacy.html" data-i18n="footer.privacy">隐私说明</a>
+        <a href="https://github.com/riozpp/netclip" rel="noopener" data-i18n="footer.source">源码仓库</a>
+      </div>
+    </div>
+    <div class="legal">
+      <span data-i18n="footer.copy">© 2026 NetClip. 本项目为独立实现。</span>
+      <span data-i18n="footer.tm">TikTok、抖音、小红书、哔哩哔哩等名称与商标归其各自权利人所有，本站与之无隶属关系。</span>
+    </div>
+  </div>
+</footer>
+
+<div class="toast-host" id="toast-host"></div>
+</body>
+</html>

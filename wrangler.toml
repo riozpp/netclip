@@ -1,0 +1,22 @@
+name = "netclip"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[observability]
+enabled = true
+
+[vars]
+PARSE_LIMIT_PER_HOUR = "60"
+
+# 可选：绑定 KV 后限流改为分布式计数（推荐生产开启）
+# [[kv_namespaces]]
+# binding = "RATE_KV"
+# id = "<your-kv-namespace-id>"
+
+# 可选：抖音 / TikTok 备用解析通道（第三层降级）
+# [vars.DOUYIN_FALLBACK_API]  ->  自建或可信的转发服务地址

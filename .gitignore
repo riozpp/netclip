@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+.rea/evidence/*.png
+.rea/evidence/*.html
+.DS_Store
+dist/

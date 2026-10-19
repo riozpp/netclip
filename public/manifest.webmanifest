@@ -1,0 +1,17 @@
+{
+  "name": "NetClip · 无水印解析下载",
+  "short_name": "NetClip",
+  "description": "多平台短视频、图文无水印解析下载工具",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#fe2c55",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
