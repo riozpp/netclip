@@ -8,3 +8,5 @@ node_modules/
 .rea/evidence/*.html
 .DS_Store
 dist/
+.rea/evidence/*.mp4
+.rea/evidence/*.txt

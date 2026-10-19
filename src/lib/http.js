@@ -125,3 +125,29 @@ export function toNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
 }
+
+// 上游接口不稳定，命中缓存可以同时降低延迟和对单一通道的依赖。
+// 只在 Workers 运行时启用（Node 本地测试没有 caches）。
+export async function cacheRead(key) {
+  if (typeof caches === 'undefined' || !caches.default) return null;
+  try {
+    const hit = await caches.default.match(new Request(`https://netclip.cache/${encodeURIComponent(key)}`));
+    return hit ? await hit.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function cacheWrite(key, value, ttl = 300) {
+  if (typeof caches === 'undefined' || !caches.default) return;
+  try {
+    await caches.default.put(
+      new Request(`https://netclip.cache/${encodeURIComponent(key)}`),
+      new Response(JSON.stringify(value), {
+        headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${ttl}` },
+      }),
+    );
+  } catch {
+    /* 缓存失败不影响主流程 */
+  }
+}

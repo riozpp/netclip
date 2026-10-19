@@ -1,0 +1,17 @@
+import pw from 'file:///C:/Users/15516/.workbuddy/binaries/node/workspace/node_modules/playwright-core/index.js';
+const { chromium } = pw;
+const b = await chromium.launch({ executablePath: 'C:/Users/15516/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe', headless: true, args: ['--no-proxy-server'] });
+const ctx = await b.newContext({ viewport: { width: 1280, height: 1000 }, locale: 'zh-CN' });
+const p = await ctx.newPage();
+p.on('response', async r => { if (r.url().includes('/api/')) console.log('API', r.status(), r.url().slice(0, 90)); });
+p.on('pageerror', e => console.log('PAGEERROR', e.message));
+p.on('console', m => { if (m.type() === 'error') console.log('CONSOLE', m.text().slice(0, 120)); });
+await p.goto('https://qsy.20240225.xyz/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+await p.waitForTimeout(600);
+await p.fill('#url-input', '9.94 复制打开抖音，看看【亮活的作品】80后苏北初中，80%的人没体验过 https://v.douyin.com/DJUL3bv7jEA/');
+await p.click('#submit-btn');
+await p.waitForTimeout(12000);
+console.log('results innerText:', (await p.innerText('#results')).slice(0, 400).replace(/\n+/g, ' | '));
+console.log('cards:', await p.$$eval('.result-card', n => n.length));
+await p.screenshot({ path: '.rea/evidence/live-douyin-result.png' });
+await b.close();

@@ -133,7 +133,7 @@ routes = [{ pattern = "example.com", custom_domain = true }]
 | --- | --- | --- |
 | `PARSE_LIMIT_PER_HOUR` | `wrangler.toml [vars]` | 每 IP 每小时解析上限，默认 60 |
 | `RATE_KV` | KV 绑定（可选） | 绑定后限流改为跨实例分布式计数 |
-| `DOUYIN_FALLBACK_API` | 环境变量（可选） | 抖音第三级降级通道 |
+| `DOUYIN_FALLBACK_API` | 环境变量（可选） | 抖音公开解析通道地址，形如 `https://your-api/dy?url=`，会拼上 URL 编码后的作品链接 |
 | `TIKTOK_FALLBACK_API` | 环境变量（可选） | TikTok 备用通道 |
 | `BILI_PROXY` | 环境变量（可选） | B 站转发前缀，如 `https://your-proxy/?url=`，值会被拼上 URL 编码后的原始地址 |
 
@@ -170,11 +170,16 @@ B 站的 412 是出口 IP 级别的风控，与代码无关：`api.bilibili.com`
 
 | 平台 | 主策略 | 降级 | 备注 |
 | --- | --- | --- | --- |
-| 抖音 | 作品信息接口 | 分享页 `_ROUTER_DATA` 解析 | 短链先展开；`playwm` 自动替换为 `play` |
+| 抖音 | 作品信息接口 | 公开解析通道 → SEO 结构化数据 | 短链先展开；详见表下注 |
 | TikTok | 第三方解析通道 | 备用通道 | 依赖外部服务可用性 |
 | 小红书 | 笔记页 `__INITIAL_STATE__` | — | 需要公开笔记；私密笔记会返回登录墙 |
 | 哔哩哔哩 | 稿件信息 + 播放地址接口 | — | 高清直链需登录态时会降级为页面信息 |
 | Instagram | 贴文 embed 页 | — | 公共贴文可解析，私密账号不可 |
+
+> **抖音通道说明（2026-10 修订）**
+> 抖音已下线 `/web/api/v2/aweme/iteminfo` 的返回内容，`/aweme/v1/web/aweme/detail` 增加了 `uifid` + `a_bogus` 签名校验（无签名直接 403 `Blocked by ArgusSecurityPlugin`），分享页 `_ROUTER_DATA` 也退化成客户端渲染壳，只剩 `video_layout` 与 `video_(id)/page` 两段空壳数据。
+> 因此现在的顺序是：老接口 → 公开解析通道 → SEO 结构化数据兜底。最后一级用蜘蛛 UA 抓分享页 `<script type="application/ld+json">` 里的 `VideoObject`，能稳定拿到标题、封面、作者、时长和互动数，但拿不到直链，此时前端会提示「打开原帖」而不是报解析失败。
+> 公开通道可用 `DOUYIN_FALLBACK_API` 换成你自己的转发服务；只要接口返回 `{ data: { url, title, author, video_backup, images } }` 这一形状即可直接复用。
 
 明确不支持：私密内容、关注可见内容、付费内容、需要登录态的平台（如 X / Facebook 私域）。
 

@@ -1,6 +1,8 @@
 import {
   ParseError,
   UA,
+  cacheRead,
+  cacheWrite,
   expandShortLink,
   firstUrl,
   pick,
@@ -79,50 +81,169 @@ function normalizeDouyinItem(item) {
 async function viaItemInfo(id) {
   const data = await requestJson(`https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids=${id}&a_bogus=`, {
     headers: { referer: 'https://www.iesdouyin.com/' },
+    timeout: 8000,
   });
   const item = data?.item_list?.[0];
   if (!item) throw new ParseError('作品不存在或已删除', 'not_found', 404);
   return normalizeDouyinItem(item);
 }
 
-async function viaSharePage(id) {
-  const html = await requestText(`https://www.iesdouyin.com/share/video/${id}/`, {
-    headers: { referer: 'https://www.iesdouyin.com/' },
-  });
-  const router = extractJsonObject(html, ['window._ROUTER_DATA', '_ROUTER_DATA=']);
-  const loader = router?.loaderData || {};
-  const key = Object.keys(loader).find((k) => k.startsWith('video_')) || Object.keys(loader)[0];
-  const item = loader?.[key]?.videoInfoRes?.item_list?.[0];
-  if (!item) throw new ParseError('分享页未返回作品数据', 'not_found', 404);
-  return normalizeDouyinItem(item);
+// 抖音自 2026 年起收紧了 web 接口：/aweme/v1/web/aweme/detail 需要 uifid + a_bogus 签名，
+// 分享页也退化为客户端渲染，_ROUTER_DATA 里只剩壳。这里保留三条路径：
+//   1) 老 iteminfo 接口（部分作品/区域仍可用，成本最低）
+//   2) 公开解析通道（可换源，见 DOUYIN_FALLBACK_API）
+//   3) SEO 结构化数据兜底（只出元数据，保证不返回「解析失败」）
+const SPIDER_UA = 'Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)';
+
+const SEO_DURATION = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/;
+
+function parseIsoDuration(value) {
+  const m = String(value || '').match(SEO_DURATION);
+  if (!m) return 0;
+  return toNumber(m[1]) * 3600 + toNumber(m[2]) * 60 + Math.round(toNumber(m[3]));
 }
 
-async function viaFallback(id, env) {
-  const base = env?.DOUYIN_FALLBACK_API;
-  if (!base) throw new ParseError('抖音解析失败，请稍后再试', 'douyin_unavailable');
-  const data = await requestJson(`${base}${base.includes('?') ? '&' : '?'}url=https://www.douyin.com/video/${id}`);
-  const item = data?.data || data;
-  if (!item?.play) throw new ParseError('备用通道无数据', 'douyin_fallback_empty');
+async function viaSeoPage(id) {
+  const html = await requestText(`https://www.iesdouyin.com/share/video/${id}/`, {
+    headers: { 'user-agent': SPIDER_UA, referer: 'https://www.iesdouyin.com/' },
+  });
+
+  for (const block of html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g)) {
+    let node;
+    try {
+      node = JSON.parse(block[1]);
+    } catch {
+      continue;
+    }
+    const list = Array.isArray(node) ? node : [node];
+    const video = list.find((entry) => entry && entry['@type'] === 'VideoObject');
+    if (!video) continue;
+
+    const creator = video.creator || {};
+    const stats = { play: 0, like: 0, comment: toNumber(video.commentCount), share: 0 };
+    for (const item of video.interactionStatistic || []) {
+      const type = String(item?.interactionType?.['@type'] || item?.interactionType || '');
+      if (type.includes('Like')) stats.like = toNumber(item.userInteractionCount);
+      if (type.includes('View') || type.includes('Watch')) stats.play = toNumber(item.userInteractionCount);
+    }
+    const cover = Array.isArray(video.thumbnailUrl) ? video.thumbnailUrl[0] : video.thumbnailUrl;
+
+    return {
+      platform: 'douyin',
+      platformName: '抖音',
+      id,
+      type: 'video',
+      title: String(video.name || '').replace(/\s*-\s*抖音$/, '') || '抖音作品',
+      desc: pick(video.description, ''),
+      cover: pick(cover, ''),
+      duration: parseIsoDuration(video.duration),
+      author: { name: pick(creator.name, '抖音用户'), id: '', avatar: '' },
+      stats,
+      videos: [],
+      images: [],
+      music: null,
+      sourceUrl: '',
+      note: '已取到作品信息，但抖音已停止对外开放直链，视频请点击「打开原站」保存。',
+    };
+  }
+
+  throw new ParseError('分享页未返回作品数据', 'not_found', 404);
+}
+
+function normalizeThirdParty(payload, id) {
+  const root = payload?.data || payload?.result || payload;
+  if (!root || typeof root !== 'object') throw new ParseError('备用通道无数据', 'douyin_fallback_empty');
+
+  const authorNode = root.author ?? root.author_info ?? {};
+  const author = typeof authorNode === 'string' ? { name: authorNode } : authorNode;
+  const stat = root.statistics || root.stats || root.extra?.statistics || {};
+
+  const videos = [];
+  const main = pick(root.url, root.play, root.video_url, root.videoUrl, root.nwm_video_url, root.video);
+  if (typeof main === 'string' && main) {
+    videos.push({ label: '无水印 · 原画', url: main, ext: 'mp4', quality: 'origin' });
+  }
+  const backups = root.video_backup || root.videos || root.quality_list || [];
+  if (Array.isArray(backups)) {
+    for (const item of backups) {
+      const url = typeof item === 'string' ? item : pick(item?.url, item?.play, '');
+      if (!url || url === main) continue;
+      const quality = pick(item?.quality, item?.gear_name, '');
+      const size = pick(item?.size_label, '');
+      const codec = pick(item?.codec, '');
+      const label = ['无水印', quality || '备用', codec ? codec.toUpperCase() : '', size].filter(Boolean).join(' · ');
+      videos.push({ label, url, ext: 'mp4', quality: quality || 'backup' });
+    }
+  }
+
+  const rawImages = root.images || root.image_list || [];
+  const images = (Array.isArray(rawImages) ? rawImages : [])
+    .map((img) => (typeof img === 'string' ? img : pick(img?.url, img?.url_list?.[0], '')))
+    .filter(Boolean);
+
+  const musicNode = root.music;
+  const music = musicNode
+    ? {
+        title: pick(musicNode.title, '原声'),
+        url: pick(musicNode.url, musicNode.play, musicNode.play_url),
+      }
+    : null;
+
+  if (!videos.length && !images.length) throw new ParseError('备用通道无直链', 'douyin_fallback_empty');
+
   return {
     platform: 'douyin',
     platformName: '抖音',
-    id,
-    type: 'video',
-    title: pick(item.title, item.desc, '抖音作品'),
-    desc: pick(item.desc, ''),
-    cover: pick(item.cover, item.origin_cover),
-    duration: toNumber(item.duration),
+    id: pick(String(root.aweme_id || root.extra?.aweme_id || id), id),
+    type: images.length ? (videos.length ? 'mixed' : 'image') : 'video',
+    title: pick(root.title, root.desc, '抖音作品'),
+    desc: pick(root.desc, root.title, ''),
+    cover: pick(root.cover, root.origin_cover, root.cover_url),
+    duration: Math.round(toNumber(root.duration) || toNumber(root.extra?.duration_ms) / 1000),
     author: {
-      name: pick(item.author, item.nickname, '抖音用户'),
-      id: pick(item.uid, ''),
-      avatar: pick(item.avatar, ''),
+      name: pick(author.name, author.nickname, root.nickname, '抖音用户'),
+      id: pick(author.id, author.uid, ''),
+      avatar: pick(author.avatar, author.avatar_url, ''),
     },
-    stats: { play: toNumber(item.play_count), like: toNumber(item.digg_count), comment: toNumber(item.comment_count), share: 0 },
-    videos: [{ label: '无水印视频', url: item.play, ext: 'mp4', quality: 'origin' }],
-    images: Array.isArray(item.images) ? item.images : [],
-    music: item.music ? { title: item.music.title || '原声', url: item.music.play } : null,
-    sourceUrl: item.url || '',
+    stats: {
+      play: toNumber(stat.play_count),
+      like: toNumber(stat.digg_count ?? stat.like_count),
+      comment: toNumber(stat.comment_count),
+      share: toNumber(stat.share_count),
+    },
+    videos,
+    images,
+    music: music?.url ? music : null,
+    sourceUrl: `https://www.douyin.com/video/${pick(String(root.aweme_id || id), id)}`,
   };
+}
+
+async function viaFallback(id, env) {
+  const target = `https://www.douyin.com/video/${id}`;
+  const providers = [];
+  if (env?.DOUYIN_FALLBACK_API) {
+    const base = env.DOUYIN_FALLBACK_API;
+    providers.push(`${base}${base.includes('?') ? '&' : '?'}url=${encodeURIComponent(target)}`);
+  }
+  providers.push(`https://api.bugpk.com/api/douyin?url=${encodeURIComponent(target)}`);
+
+  let last;
+  for (const endpoint of providers) {
+    try {
+      const payload = await requestJson(endpoint, {
+        headers: { 'user-agent': UA.desktop, accept: 'application/json', referer: 'https://www.douyin.com/' },
+        timeout: 15000,
+      });
+      const code = Number(payload?.code);
+      if (Number.isFinite(code) && code !== 0 && code !== 200) {
+        throw new ParseError(pick(payload?.msg, '备用通道返回异常'), 'douyin_fallback_error');
+      }
+      return normalizeThirdParty(payload, id);
+    } catch (err) {
+      last = err;
+    }
+  }
+  throw last || new ParseError('抖音解析失败，请稍后再试', 'douyin_unavailable');
 }
 
 export async function resolveDouyin(input, env) {
@@ -133,21 +254,34 @@ export async function resolveDouyin(input, env) {
   const id = findId(target);
   if (!id) throw new ParseError('未能从链接中识别作品 ID，请使用完整分享链接', 'bad_url', 400);
 
+  const cacheKey = `douyin:${id}`;
+  const cached = await cacheRead(cacheKey);
+  if (cached) return { ...cached, sourceUrl: cached.sourceUrl || target };
+
   const strategies = [
     () => viaItemInfo(id),
-    () => viaSharePage(id),
     () => viaFallback(id, env),
+    () => viaSeoPage(id),
   ];
   let last;
   for (const strategy of strategies) {
     try {
       const result = await strategy();
-      if (result) return { ...result, id: result.id || id, sourceUrl: result.sourceUrl || target };
+      if (!result) continue;
+      const merged = { ...result, id: result.id || id, sourceUrl: result.sourceUrl || target };
+      // 只缓存真正拿到媒体的结果，避免把「仅元数据」状态固化 5 分钟
+      if (merged.videos?.length || merged.images?.length) await cacheWrite(cacheKey, merged, 300);
+      return merged;
     } catch (err) {
       last = err;
     }
   }
-  throw last || new ParseError('抖音解析失败', 'douyin_unavailable');
+  if (last?.code === 'not_found' || last?.code === 'bad_url') throw last;
+  throw new ParseError(
+    '抖音通道暂时不可用，请稍后重试；也可以先打开原帖在线观看。',
+    'douyin_unavailable',
+    502,
+  );
 }
 
 function normalizeTikTok(payload, sourceUrl) {
