@@ -10,3 +10,4 @@ node_modules/
 dist/
 .rea/evidence/*.mp4
 .rea/evidence/*.txt
+.rea/
