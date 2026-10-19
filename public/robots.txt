@@ -2,4 +2,4 @@ User-agent: *
 Allow: /
 Disallow: /api/
 
-Sitemap: https://netclip.pages.dev/sitemap.xml
+Sitemap: https://qsy.20240225.xyz/sitemap.xml

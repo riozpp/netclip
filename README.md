@@ -7,7 +7,12 @@
 | 路由 | 版式 | 说明 |
 | --- | --- | --- |
 | `/` | 浅色 · 中文优先（可切英文） | 居中 Hero + 四特性 + 四步流程 + 内容类型 + FAQ |
-| `/kuku.html` | 深色 · 英文 | 双栏 Hero 带预览面板 + 平台 Tab + 三特性 + 三步流程 + 六条 FAQ |
+| `/kuku` | 深色 · 英文 | 双栏 Hero 带预览面板 + 平台 Tab + 三特性 + 三步流程 + 六条 FAQ |
+
+线上入口：
+
+- 主域名：<https://qsy.20240225.xyz>
+- 备用：<https://netclip.riozpp.workers.dev>
 
 两套页面共享同一套样式变量与前端逻辑，主题差异由 `public/pro.css` 覆盖实现。
 
@@ -130,6 +135,34 @@ routes = [{ pattern = "example.com", custom_domain = true }]
 | `RATE_KV` | KV 绑定（可选） | 绑定后限流改为跨实例分布式计数 |
 | `DOUYIN_FALLBACK_API` | 环境变量（可选） | 抖音第三级降级通道 |
 | `TIKTOK_FALLBACK_API` | 环境变量（可选） | TikTok 备用通道 |
+| `BILI_PROXY` | 环境变量（可选） | B 站转发前缀，如 `https://your-proxy/?url=`，值会被拼上 URL 编码后的原始地址 |
+
+### 域名绑定
+
+`wrangler.toml` 里以声明式方式绑定自定义域名，部署时 Cloudflare 自动创建 DNS 记录并签发证书：
+
+```toml
+routes = [
+  { pattern = "qsy.20240225.xyz", custom_domain = true }
+]
+workers_dev = true   # 同时保留 <name>.<subdomain>.workers.dev 备用入口
+```
+
+换域名只需改 `pattern`；若同时保留多个域名，在数组里追加即可。
+
+## 线上实测记录
+
+| 平台 | 从本机（住宅 IP） | 从 Cloudflare 边缘 |
+| --- | --- | --- |
+| 哔哩哔哩 | ✅ 标题 / 作者 / 统计 / 720P 直链 | ⚠️ 接口与网页均返回 412 |
+| 图床 CDN（hdslb） | ✅ 651KB 原图完整取回 | ✅ 代理正常 |
+
+B 站的 412 是出口 IP 级别的风控，与代码无关：`api.bilibili.com` 和 `www.bilibili.com` 都会拦 Cloudflare 网段。解法有两种，二选一：
+
+1. 配置 `BILI_PROXY` 走一层转发通道；
+2. 把 B 站请求改为经 Cloudflare 之外的自建服务中转。
+
+为避免误导，前端在这种情况下会明确提示「B 站对当前出口 IP 做了风控（412）」，而不是给一个含义模糊的失败。
 
 ## 解析策略与已知限制
 

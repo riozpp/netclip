@@ -278,29 +278,99 @@ export async function resolveXiaohongshu(input) {
   };
 }
 
-export async function resolveBilibili(input) {
+function biliCookie() {
+  const hex = () => Math.random().toString(16).slice(2, 12).toUpperCase();
+  return `buvid3=${hex()}-${hex()}-${hex()}-${hex()}infoc; b_nut=${Math.floor(Date.now() / 1000)};`;
+}
+
+function biliHeaders(referer = 'https://www.bilibili.com/') {
+  return {
+    'user-agent': UA.desktop,
+    referer,
+    origin: 'https://www.bilibili.com',
+    cookie: biliCookie(),
+    accept: 'application/json, text/plain, */*',
+    'accept-language': 'zh-CN,zh;q=0.9',
+    'sec-fetch-site': 'same-site',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-dest': 'empty',
+  };
+}
+
+async function biliView(query, bvid, env) {
+  const viaProxy = Boolean(env?.BILI_PROXY);
+  const proxy = viaProxy ? (u) => env.BILI_PROXY + encodeURIComponent(u) : (u) => u;
+
+  try {
+    const res = await request(proxy(`https://api.bilibili.com/x/web-interface/view?${query}`), {
+      headers: biliHeaders(),
+      timeout: 12000,
+    });
+    if (res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      if (payload?.code === 0 && payload.data) return { info: payload.data, via: viaProxy ? 'proxy' : 'api' };
+    }
+  } catch {
+    /* 落到 HTML 兜底 */
+  }
+
+  if (!bvid) throw new ParseError('B 站接口返回异常，请稍后重试', 'bili_blocked', 502);
+
+  let html = '';
+  try {
+    html = await requestText(proxy(`https://www.bilibili.com/video/${bvid}/`), {
+      headers: { ...biliHeaders(`https://www.bilibili.com/video/${bvid}/`), accept: 'text/html,application/xhtml+xml' },
+      timeout: 15000,
+    });
+  } catch {
+    html = '';
+  }
+  const state = extractJsonObject(html, ['window.__INITIAL_STATE__']);
+  const video = state?.videoData;
+  if (!video) {
+    throw new ParseError(
+      'B 站对当前出口 IP 做了风控（412）。可配置 BILI_PROXY 走转发通道，或改在网络环境正常的节点访问。',
+      'bili_blocked',
+      502,
+    );
+  }
+  return { info: { ...video, bvid: video.bvid || bvid }, via: 'html' };
+}
+
+export async function resolveBilibili(input, env) {
   const bv = input.match(/(BV[0-9A-Za-z]{10})/);
   const av = input.match(/\/av(\d+)/i);
   const query = bv ? `bvid=${bv[1]}` : av ? `aid=${av[1]}` : '';
   if (!query) throw new ParseError('未能识别 B 站视频号', 'bad_url', 400);
 
-  const view = await requestJson(`https://api.bilibili.com/x/web-interface/view?${query}`, {
-    headers: { referer: 'https://www.bilibili.com/' },
-  });
-  if (view?.code !== 0 || !view.data) throw new ParseError(view?.message || 'B 站视频不存在', 'not_found', 404);
-  const info = view.data;
+  const { info } = await biliView(query, bv ? bv[1] : '', env);
+  if (!info?.bvid) throw new ParseError('B 站视频不存在或已删除', 'not_found', 404);
+
   const cid = info.pages?.[0]?.cid || info.cid;
+  const playQuery = `bvid=${info.bvid}&cid=${cid}`;
 
   let videos = [];
-  try {
-    const play = await requestJson(
-      `https://api.bilibili.com/x/player/playurl?${query}&cid=${cid}&qn=64&fnval=1&platform=html5&high_quality=1`,
-      { headers: { referer: `https://www.bilibili.com/video/${info.bvid}` } },
-    );
-    const durl = play?.data?.durl?.[0];
-    if (durl?.url) videos = [{ label: '视频 · 720P', url: durl.url, ext: 'mp4', quality: '720p' }];
-  } catch {
-    videos = [];
+  const attempts = [
+    `${playQuery}&qn=64&fnval=1&platform=html5&high_quality=1`,
+    `${playQuery}&qn=32&fnval=0&platform=html5&high_quality=1`,
+  ];
+  for (const qs of attempts) {
+    try {
+      const target = `https://api.bilibili.com/x/player/playurl?${qs}`;
+      const res = await request(env?.BILI_PROXY ? env.BILI_PROXY + encodeURIComponent(target) : target, {
+        headers: biliHeaders(`https://www.bilibili.com/video/${info.bvid}`),
+        timeout: 12000,
+      });
+      if (!res.ok) continue;
+      const play = await res.json().catch(() => ({}));
+      const durl = play?.data?.durl?.[0];
+      if (durl?.url) {
+        videos = [{ label: qs.includes('qn=64') ? '视频 · 720P' : '视频 · 360P', url: durl.url, ext: 'mp4', quality: '720p' }];
+        break;
+      }
+    } catch {
+      /* 尝试下一档 */
+    }
   }
 
   return {
@@ -318,7 +388,7 @@ export async function resolveBilibili(input) {
     images: [],
     music: null,
     sourceUrl: `https://www.bilibili.com/video/${info.bvid}`,
-    note: videos.length ? '' : 'B 站高清直链需要登录态，已回退为页面信息，可在源站播放。',
+    note: videos.length ? '' : 'B 站直链需要登录态或当前出口被限流，已回退为页面信息，可在源站播放。',
   };
 }
 

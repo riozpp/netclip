@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://netclip.pages.dev/</loc>
+    <loc>https://qsy.20240225.xyz/</loc>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://netclip.pages.dev/kuku.html</loc>
+    <loc>https://qsy.20240225.xyz/kuku</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://netclip.pages.dev/docs/terms.html</loc>
+    <loc>https://qsy.20240225.xyz/docs/terms.html</loc>
     <changefreq>monthly</changefreq>
     <priority>0.3</priority>
   </url>
   <url>
-    <loc>https://netclip.pages.dev/docs/privacy.html</loc>
+    <loc>https://qsy.20240225.xyz/docs/privacy.html</loc>
     <changefreq>monthly</changefreq>
     <priority>0.3</priority>
   </url>

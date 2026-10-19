@@ -2,6 +2,15 @@ name = "netclip"
 main = "src/index.js"
 compatibility_date = "2025-06-01"
 
+# 自定义域名：qsy.20240225.xyz（Cloudflare 自动签发证书并创建 DNS 记录）
+routes = [
+  { pattern = "qsy.20240225.xyz", custom_domain = true }
+]
+
+# 同时保留 <name>.<subdomain>.workers.dev 的备用入口
+workers_dev = true
+preview_urls = false
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
