@@ -4,7 +4,11 @@
 
   var PAGE = document.documentElement.getAttribute('data-page') || 'home';
   var API_PARSE = '/api/parse';
-  var ATTEMPT_TIMEOUT = 14000;
+  // Cloudflare 出口偶发会被上游拖住：代码层可能已经解析完，但 worker 要等那个
+  // 挂起的连接结束才会把响应发出来。注意此时结果已经写进 KV 缓存了，
+  // 所以「超时后重试」几乎必然命中缓存、秒回，这是最有效的兜底手段。
+  var ATTEMPT_TIMEOUT = 10000;
+  var MAX_ATTEMPTS = 3;
   var API_PROXY = '/api/proxy';
   var MAX_BATCH = 6;
 
@@ -454,7 +458,7 @@
     setLoading(true);
 
     // Cloudflare 出口偶发会被上游拖住，代码层已经超时返回，但浏览器要等到那个
-    // 挂起的连接结束才收到响应。所以前端自己做超时 + 自动重试一次，第二次基本都能命中缓存。
+    // 挂起的连接结束才收到响应。所以前端自己做超时 + 自动重试，最多三次。
     var doRequest = function () {
       var ctrl = new AbortController();
       var timer = setTimeout(function () { ctrl.abort(); }, ATTEMPT_TIMEOUT);
@@ -475,8 +479,17 @@
         });
     };
 
-    doRequest()
-      .catch(function () { return doRequest(); })
+    // 首次解析如果撞上挂起，结果其实已经写进缓存了，重试就能秒回
+    var attempt = 0;
+    var run = function () {
+      attempt += 1;
+      return doRequest().catch(function (err) {
+        if (attempt < MAX_ATTEMPTS) return run();
+        throw err;
+      });
+    };
+
+    run()
       .then(function (result) {
         var body = result.body || {};
         box.innerHTML = '';
