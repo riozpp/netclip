@@ -9,26 +9,14 @@ import {
   request,
   requestJson,
   requestText,
+  readTextSafe,
   releaseBody,
   extractJsonObject,
   toNumber,
+  withTimeout,
 } from '../lib/http.js';
 
 export { ParseError };
-
-// 上游有时「发完响应头就不再吐 body」，fetch 的 AbortSignal 管不到 res.text()，
-// 这里给任意 promise 套一层硬超时，避免单个请求把整次解析拖死。
-// 注意：race 落败的一方之后若 reject，因为已经没人 await 它，会变成 unhandled rejection，
-// Workers 遇到这种情况会直接杀掉整个请求（表现是客户端收到 502 而非 500）。
-// 所以必须提前给原 promise 挂一个空 catch。
-function withTimeout(promise, ms, message = 'timeout') {
-  promise.catch(() => {});
-  let timer;
-  const guard = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
-}
 
 const ID_PATTERNS = [
   /\/video\/(\d{6,})/,
@@ -270,7 +258,7 @@ export async function resolveDouyin(input, env) {
   if (!id) throw new ParseError('未能从链接中识别作品 ID，请使用完整分享链接', 'bad_url', 400);
 
   const cacheKey = `douyin:${id}`;
-  const cached = await cacheRead(cacheKey);
+  const cached = await cacheRead(cacheKey, env);
   if (cached) return { ...cached, sourceUrl: cached.sourceUrl || target };
 
   const strategies = [
@@ -285,7 +273,7 @@ export async function resolveDouyin(input, env) {
       if (!result) continue;
       const merged = { ...result, id: result.id || id, sourceUrl: result.sourceUrl || target };
       // 只缓存真正拿到媒体的结果，避免把「仅元数据」状态固化 5 分钟
-      if (merged.videos?.length || merged.images?.length) await cacheWrite(cacheKey, merged, 300);
+      if (merged.videos?.length || merged.images?.length) await cacheWrite(cacheKey, merged, 300, env);
       return merged;
     } catch (err) {
       last = err;
@@ -366,20 +354,9 @@ export async function resolveTikTok(input, env) {
 const XHS_NOTE_ID = /\/(?:explore|discovery\/item|item|board)\/([0-9a-f]{16,})/i;
 const XHS_SHORT_HOSTS = ['xhslink.com', 'xhslink.cn', 'xhslink.net'];
 
-// 小红书对机房 IP 段（含 Cloudflare 边缘）直接 302 到登录页，
-// 这里借其它出口的中转服务代抓同一页面，再在本地解析 SSR 数据。
-// 公共通道都会限流（429），所以同时挂几个不同服务商，谁先给数据用谁。
-const XHS_RELAYS = [
-  { name: 'gt_en', build: (url) => gtRelay(url, 'auto', 'en', 'en') },
-  { name: 'gt_tw', build: (url) => gtRelay(url, 'auto', 'zh-TW', 'zh-TW') },
-  { name: 'gt_ja', build: (url) => gtRelay(url, 'auto', 'ja', 'ja') },
-];
-
-function gtRelay(url, sl, tl, hl) {
-  const u = new URL(url);
-  const host = u.hostname.replace(/\./g, '-');
-  return `https://${host}.translate.goog${u.pathname}${u.search}${u.search ? '&' : '?'}_x_tr_sl=${sl}&_x_tr_tl=${tl}&_x_tr_hl=${hl}`;
-}
+// 曾经这里挂过 Google 翻译等公共中转（translate.goog）来绕开机房 IP 封禁，
+// 但从 Cloudflare 出口打过去长期是 429，串行三个就白等 10 秒。
+// 现在主通道换成了 rednote 国际站，公共中转全部下线，只保留一个可选的 XHS_PROXY 自建出口。
 
 function isXhsShortLink(url) {
   try {
@@ -400,18 +377,23 @@ function readXsecToken(url) {
 
 // 小红书从 2025 年起对笔记强制 xsec_token 校验：没有 token 的 explore 链接一律 307 到 404 页。
 // token 只存在于 App「分享 → 复制链接」得到的短链里，所以短链必须逐跳展开并把 token 带走。
-async function expandXhsShortLink(input) {
+// 展开本身也必须封顶：逐跳串行，每跳 7s，4 跳就能拖到 28s，把整次解析远远甩过硬超时。
+function expandXhsShortLink(input, env) {
+  return withTimeout(expandXhsShortLinkInner(input, env), 6000, 'expand_timeout');
+}
+
+async function expandXhsShortLinkInner(input, env) {
   const cacheKey = `xhs:short:${input}`;
-  const cached = await cacheRead(cacheKey);
+  const cached = await cacheRead(cacheKey, env);
   if (cached?.target) return cached.target;
 
   let current = input;
   let resolved = current;
-  for (let hop = 0; hop < 4; hop += 1) {
+  for (let hop = 0; hop < 3; hop += 1) {
     const res = await request(current, {
       redirect: 'manual',
       headers: { referer: 'https://www.xiaohongshu.com/', 'user-agent': UA.ios },
-      timeout: 7000,
+      timeout: 6000,
     });
     const location = res.headers.get('location');
     // 拿到 Location 就走人，但 body 必须显式关掉，否则这条连接会挂住整个请求
@@ -435,7 +417,7 @@ async function expandXhsShortLink(input) {
   }
   // 短链 → 目标地址的映射很稳定，缓存一小时可以省掉每次解析前的 1~2 跳往返
   if (resolved !== input && (XHS_NOTE_ID.test(resolved) || /xsec_token=/.test(resolved))) {
-    await cacheWrite(cacheKey, { target: resolved }, 3600);
+    await cacheWrite(cacheKey, { target: resolved }, 3600, env);
   }
   return resolved;
 }
@@ -550,7 +532,7 @@ export async function resolveXiaohongshu(input, env) {
   const guard = new Promise((_, reject) => {
     timer = setTimeout(
       () => reject(new ParseError('小红书解析超时，请稍后重试', 'xhs_timeout', 504, `hard_timeout|${trace.join('|')}`)),
-      17000,
+      13000,
     );
   });
   try {
@@ -567,7 +549,7 @@ async function xhsPipeline(input, env, trace) {
 
   if (!noteId || !token) {
     try {
-      const expanded = await expandXhsShortLink(target);
+      const expanded = await expandXhsShortLink(target, env);
       if (expanded !== target) {
         target = expanded;
         if (!noteId) noteId = (target.match(XHS_NOTE_ID) || [])[1] || '';
@@ -589,7 +571,7 @@ async function xhsPipeline(input, env, trace) {
   }
 
   const cacheKey = `xhs:${noteId}`;
-  const cached = await cacheRead(cacheKey);
+  const cached = await cacheRead(cacheKey, env);
   if (cached) return cached;
 
   const attempts = [];
@@ -600,32 +582,24 @@ async function xhsPipeline(input, env, trace) {
 
   // 主用通道：rednote.com 是小红书国际站，同一 noteId 通用，境外机房出口不会被
   // xiaohongshu.com 的 /website-login/captcha 人机墙拦下，蜘蛛 UA 直接拿到 SSR 数据。
+  // 直连 xiaohongshu.com 在 Cloudflare 出口上必定 302 到人机墙，只会白白拖长时间，已移除。
   if (token) {
     push(`https://www.rednote.com/discovery/item/${noteId}${shareQuery}`, UA.spider, 'rednote', 'direct', 'manual', 6000);
     // 同一站点的两条路径有时只有一条吐 SSR（另一条给客户端渲染的空壳），都试一下
-    push(`https://www.rednote.com/explore/${noteId}${shareQuery}`, UA.spider, 'rednote_explore', 'direct', 'manual', 6000);
+    push(`https://www.rednote.com/explore/${noteId}${shareQuery}`, UA.spider, 'rednote_explore', 'direct', 'manual', 5000);
   }
-  // 兜底直连：机房 IP 会 302 到登录墙，放后面只作为万一 rednote 不可用时的备用
-  push(`${shareUrl(noteId)}${shareQuery}`, UA.spider, 'direct', 'direct', 'manual', 4000);
-  if (token) {
-    if (env?.XHS_PROXY) {
-      push(`${env.XHS_PROXY}${encodeURIComponent(`${shareUrl(noteId)}${shareQuery}`)}`, UA.desktop, 'own_proxy', 'relay', 'follow', 12000);
-    }
-    for (const relay of XHS_RELAYS) {
-      try {
-        push(relay.build(`${shareUrl(noteId)}${shareQuery}`), UA.desktop, relay.name, 'relay', 'follow', 3500, relay.headers);
-      } catch {
-        /* 忽略构造失败的转发通道 */
-      }
-    }
+  if (token && env?.XHS_PROXY) {
+    push(`${env.XHS_PROXY}${encodeURIComponent(`${shareUrl(noteId)}${shareQuery}`)}`, UA.desktop, 'own_proxy', 'relay', 'follow', 10000);
   }
-  // 无 token 的直连只作为兜底：多数情况会 307 到 404，但部分老笔记仍可访问
-  push(`https://www.xiaohongshu.com/explore/${noteId}`, UA.spider, 'expl_bare', 'last', 'manual', 5000);
 
-  const finish = (result) => {
+  const finish = async (result) => {
     // 图片直链是按时段签名的，缓存时间要短于签名有效期。
-    // 不 await：写缓存失败不该拖慢响应，响应返回后 worker 仍会把它跑完。
-    cacheWrite(cacheKey, result, 240).catch(() => {});
+    // 必须 await：响应一旦返回 worker 就会被回收，不 await 的 KV 写入会被直接丢掉。
+    try {
+      await cacheWrite(cacheKey, result, 240, env);
+    } catch {
+      /* 缓存失败不影响返回 */
+    }
     return result;
   };
 
@@ -652,10 +626,10 @@ async function xhsPipeline(input, env, trace) {
       return null;
     }
 
-    // res.text() 不受 fetch 的 AbortSignal 保护，卡住时要靠这层兜底
+    // res.text() 读小红书这类响应会永久卡住并冻住事件循环，必须分块读
     let html;
     try {
-      html = await withTimeout(res.text(), attempt.timeout + 1500);
+      html = await readTextSafe(res, attempt.timeout + 1000);
     } catch {
       try {
         res.body?.cancel().catch(() => {});
@@ -689,23 +663,26 @@ async function xhsPipeline(input, env, trace) {
     return result;
   };
 
-  for (const attempt of attempts.filter((a) => a.group === 'direct')) {
-    const result = await runAttempt(attempt);
-    if (result) return finish(result);
-  }
+  // 逐条串行。并发虽然更快，但多个 fetch 同时挂起时 worker 会整体卡住、
+  // 连硬超时都不再触发（实测挂到 30s 以上），串行反而能稳定在可预期的范围内。
+  const runGroup = async (group) => {
+    for (const attempt of attempts.filter((a) => a.group === group)) {
+      const result = await runAttempt(attempt);
+      if (result) return result;
+    }
+    return null;
+  };
 
-  // 转发通道逐个尝试：并发虽然快，但多个 fetch 挂起时 CF 的定时器会被推迟，
-  // 单次超时形同虚设，实测反而更慢（33s+）。串行每个 5s，最坏也能收在 16s 内。
-  const relays = attempts.filter((a) => a.group === 'relay');
-  for (const attempt of relays) {
-    const result = await runAttempt(attempt);
-    if (result) return finish(result);
-  }
+  // direct 组 = rednote 国际站两条路径 + 国内站直连，并行后最坏只等 6s
+  const directHit = await runGroup('direct');
+  if (directHit) return finish(directHit);
 
-  for (const attempt of attempts.filter((a) => a.group === 'last')) {
-    const result = await runAttempt(attempt);
-    if (result) return finish(result);
-  }
+  // relay 组只有用户自建的 XHS_PROXY（公共中转已全部下线）
+  const relayHit = await runGroup('relay');
+  if (relayHit) return finish(relayHit);
+
+  const lastHit = await runGroup('last');
+  if (lastHit) return finish(lastHit);
 
   throw new ParseError(
     token

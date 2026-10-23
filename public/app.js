@@ -4,6 +4,7 @@
 
   var PAGE = document.documentElement.getAttribute('data-page') || 'home';
   var API_PARSE = '/api/parse';
+  var ATTEMPT_TIMEOUT = 14000;
   var API_PROXY = '/api/proxy';
   var MAX_BATCH = 6;
 
@@ -452,16 +453,30 @@
     renderSkeleton(urls.length);
     setLoading(true);
 
-    fetch(API_PARSE, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ urls: urls })
-    })
-      .then(function (res) {
-        return res.json().then(function (body) {
-          return { status: res.status, body: body };
-        });
+    // Cloudflare 出口偶发会被上游拖住，代码层已经超时返回，但浏览器要等到那个
+    // 挂起的连接结束才收到响应。所以前端自己做超时 + 自动重试一次，第二次基本都能命中缓存。
+    var doRequest = function () {
+      var ctrl = new AbortController();
+      var timer = setTimeout(function () { ctrl.abort(); }, ATTEMPT_TIMEOUT);
+      return fetch(API_PARSE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ urls: urls }),
+        signal: ctrl.signal
       })
+        .then(function (res) {
+          clearTimeout(timer);
+          return res.json().then(function (body) {
+            return { status: res.status, body: body };
+          });
+        }, function (err) {
+          clearTimeout(timer);
+          throw err;
+        });
+    };
+
+    doRequest()
+      .catch(function () { return doRequest(); })
       .then(function (result) {
         var body = result.body || {};
         box.innerHTML = '';

@@ -85,6 +85,7 @@ export default {
         return json({ ok: true, data: PLATFORMS });
       }
 
+
       if (url.pathname === '/api/parse') {
         return await handleParse(request, env, url);
       }

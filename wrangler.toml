@@ -22,6 +22,12 @@ enabled = true
 [vars]
 PARSE_LIMIT_PER_HOUR = "60"
 
+# 解析结果缓存。Cache API 只在本边缘节点有效，用户从不同地区访问会反复打上游；
+# 小红书国际站对同一出口有速率限制，所以用 KV 做跨节点共享，显著降低命中上游的次数。
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "3e9b8c0f5b8e4747ae1bfdb39c64c01f"
+
 # 可选：绑定 KV 后限流改为分布式计数（推荐生产开启）
 # [[kv_namespaces]]
 # binding = "RATE_KV"

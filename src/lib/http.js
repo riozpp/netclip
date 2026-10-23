@@ -20,21 +20,29 @@ export class ParseError extends Error {
 
 export async function request(url, options = {}) {
   const { timeout = 12000, headers = {}, ...rest } = options;
-  // 用手动 AbortController + setTimeout 时，多个请求并发挂起会让定时器被推迟，
-  // 实际表现是「超时形同虚设、请求拖到 30s 被平台杀掉」，改用原生超时信号。
-  const signal = AbortSignal.timeout(timeout);
+  // 这里有个非常反直觉的 Workers 行为：即使你的代码已经 return 了 Response，
+  // 只要还有一个 fetch 挂着没结束，worker 就不会把响应发出去，客户端只能干等到那个
+  // fetch 自己超时（实测代码层 3s 就返回了，用户 34s 才拿到响应）。
+  // 所以超时后必须「真的 abort 掉连接」，光是 Promise.race 提前返回没用。
+  const controller = new AbortController();
+  const doFetch = fetch(url, {
+    ...rest,
+    headers: {
+      'user-agent': UA_IOS,
+      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      ...headers,
+    },
+    signal: controller.signal,
+  });
   try {
-    return await fetch(url, {
-      ...rest,
-      headers: {
-        'user-agent': UA_IOS,
-        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        ...headers,
-      },
-      signal,
-    });
+    return await withTimeout(doFetch, timeout, 'fetch_timeout');
   } catch (err) {
-    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+    try {
+      controller.abort();
+    } catch {
+      /* 已经结束 */
+    }
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError' || err?.message === 'fetch_timeout') {
       throw new ParseError('上游响应超时，请稍后重试', 'upstream_timeout', 504);
     }
     throw new ParseError('无法连接上游平台，请检查链接或稍后重试', 'upstream_unreachable', 502);
@@ -94,6 +102,51 @@ export function extractJsonObject(text, markers) {
   return null;
 }
 
+// Workers 上 res.text() 读某些响应会「拿到响应头后永久卡住」，而且此时事件循环被占住，
+// 连 setTimeout 都不再触发（实测整条请求 60s 无响应、硬超时形同虚设）。
+// 唯一可靠的做法是自己分块 read，每块之间重新计时，超时就 cancel 掉 reader。
+export async function readTextSafe(res, ms, maxBytes = 4_000_000) {
+  if (!res?.body) return '';
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  const deadline = Date.now() + ms;
+  try {
+    for (;;) {
+      const remain = deadline - Date.now();
+      if (remain <= 0) throw new Error('body_timeout');
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('body_timeout')), remain);
+      });
+      timeout.catch(() => {});
+      let chunk;
+      try {
+        chunk = await Promise.race([reader.read(), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (chunk.done) break;
+      chunks.push(chunk.value);
+      total += chunk.value.length;
+      if (total > maxBytes) throw new Error('body_too_large');
+    }
+  } finally {
+    try {
+      reader.cancel().catch(() => {});
+    } catch {
+      /* 已关闭 */
+    }
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return new TextDecoder().decode(merged);
+}
+
 // 只读响应头就返回时必须把 body 关掉。不消费也不 cancel 的响应在 Workers 上
 // 会一直占着连接，表现是「通道 500ms 就出结果，但整个请求要 15s 才返回」。
 export function releaseBody(res) {
@@ -146,26 +199,70 @@ export function toNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// 给任意 promise 套一层硬超时。提前给原 promise 挂空 catch，
+// 否则 race 落败方稍后 reject 时会变成 unhandled rejection，Workers 会直接杀掉整个请求。
+export function withTimeout(promise, ms, message = 'timeout') {
+  promise.catch(() => {});
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
 // 上游接口不稳定，命中缓存可以同时降低延迟和对单一通道的依赖。
-// 只在 Workers 运行时启用（Node 本地测试没有 caches）。
-export async function cacheRead(key) {
+// Cache API 只在本边缘节点有效，同一份结果换地区就没了；绑定了 CACHE_KV 时优先走 KV，
+// 让所有节点共享一份（小红书国际站对单出口有速率限制，这一点很关键）。
+// KV 读写偶尔会挂住（实测有一次卡了 20s），所以两个方向都要封顶，不能让缓存拖死主流程。
+// 只在 Workers 运行时启用（Node 本地测试既没有 caches 也没有 KV 绑定）。
+export async function cacheRead(key, env) {
+  const kv = env?.CACHE_KV;
+  if (kv) {
+    try {
+      const hit = await withTimeout(kv.get(key, 'json'), 1500, 'kv_read_timeout');
+      if (hit) return hit;
+    } catch {
+      /* KV 读失败或超时就退回 Cache API */
+    }
+  }
   if (typeof caches === 'undefined' || !caches.default) return null;
   try {
-    const hit = await caches.default.match(new Request(`https://netclip.cache/${encodeURIComponent(key)}`));
-    return hit ? await hit.json() : null;
+    const hit = await withTimeout(
+      caches.default.match(new Request(`https://netclip.cache/${encodeURIComponent(key)}`)),
+      1500,
+      'cache_read_timeout',
+    );
+    return hit ? await withTimeout(hit.json(), 1500, 'cache_json_timeout') : null;
   } catch {
     return null;
   }
 }
 
-export async function cacheWrite(key, value, ttl = 300) {
+export async function cacheWrite(key, value, ttl = 300, env) {
+  const kv = env?.CACHE_KV;
+  if (kv) {
+    try {
+      // KV 的 expirationTtl 下限是 60 秒
+      await withTimeout(
+        kv.put(key, JSON.stringify(value), { expirationTtl: Math.max(60, ttl) }),
+        2500,
+        'kv_write_timeout',
+      );
+    } catch {
+      /* 写失败不影响主流程 */
+    }
+  }
   if (typeof caches === 'undefined' || !caches.default) return;
   try {
-    await caches.default.put(
-      new Request(`https://netclip.cache/${encodeURIComponent(key)}`),
-      new Response(JSON.stringify(value), {
-        headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${ttl}` },
-      }),
+    await withTimeout(
+      caches.default.put(
+        new Request(`https://netclip.cache/${encodeURIComponent(key)}`),
+        new Response(JSON.stringify(value), {
+          headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${ttl}` },
+        }),
+      ),
+      2000,
+      'cache_write_timeout',
     );
   } catch {
     /* 缓存失败不影响主流程 */
