@@ -9,11 +9,26 @@ import {
   request,
   requestJson,
   requestText,
+  releaseBody,
   extractJsonObject,
   toNumber,
 } from '../lib/http.js';
 
 export { ParseError };
+
+// 上游有时「发完响应头就不再吐 body」，fetch 的 AbortSignal 管不到 res.text()，
+// 这里给任意 promise 套一层硬超时，避免单个请求把整次解析拖死。
+// 注意：race 落败的一方之后若 reject，因为已经没人 await 它，会变成 unhandled rejection，
+// Workers 遇到这种情况会直接杀掉整个请求（表现是客户端收到 502 而非 500）。
+// 所以必须提前给原 promise 挂一个空 catch。
+function withTimeout(promise, ms, message = 'timeout') {
+  promise.catch(() => {});
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
 
 const ID_PATTERNS = [
   /\/video\/(\d{6,})/,
@@ -353,12 +368,11 @@ const XHS_SHORT_HOSTS = ['xhslink.com', 'xhslink.cn', 'xhslink.net'];
 
 // 小红书对机房 IP 段（含 Cloudflare 边缘）直接 302 到登录页，
 // 这里借其它出口的中转服务代抓同一页面，再在本地解析 SSR 数据。
-// Google 翻译对同一目标地址会按语言对分别缓存，多开几个语言相当于多几次机会。
+// 公共通道都会限流（429），所以同时挂几个不同服务商，谁先给数据用谁。
 const XHS_RELAYS = [
   { name: 'gt_en', build: (url) => gtRelay(url, 'auto', 'en', 'en') },
-  { name: 'gt_tw', build: (url) => gtRelay(url, 'zh-CN', 'zh-TW', 'zh-TW') },
+  { name: 'gt_tw', build: (url) => gtRelay(url, 'auto', 'zh-TW', 'zh-TW') },
   { name: 'gt_ja', build: (url) => gtRelay(url, 'auto', 'ja', 'ja') },
-  { name: 'allorigins', build: (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` },
 ];
 
 function gtRelay(url, sl, tl, hl) {
@@ -387,25 +401,43 @@ function readXsecToken(url) {
 // 小红书从 2025 年起对笔记强制 xsec_token 校验：没有 token 的 explore 链接一律 307 到 404 页。
 // token 只存在于 App「分享 → 复制链接」得到的短链里，所以短链必须逐跳展开并把 token 带走。
 async function expandXhsShortLink(input) {
+  const cacheKey = `xhs:short:${input}`;
+  const cached = await cacheRead(cacheKey);
+  if (cached?.target) return cached.target;
+
   let current = input;
-  for (let hop = 0; hop < 5; hop += 1) {
+  let resolved = current;
+  for (let hop = 0; hop < 4; hop += 1) {
     const res = await request(current, {
       redirect: 'manual',
       headers: { referer: 'https://www.xiaohongshu.com/', 'user-agent': UA.ios },
-      timeout: 12000,
+      timeout: 7000,
     });
     const location = res.headers.get('location');
+    // 拿到 Location 就走人，但 body 必须显式关掉，否则这条连接会挂住整个请求
+    releaseBody(res);
     if (!location) break;
     const next = new URL(location, current).toString();
-    if (XHS_NOTE_ID.test(next) || /xsec_token=/.test(next)) return next;
+    if (XHS_NOTE_ID.test(next) || /xsec_token=/.test(next)) {
+      resolved = next;
+      break;
+    }
     // 登录墙会把原始链接塞进 redirectPath，URL 解码后仍可取到 noteId 与 token
     if (next.includes('redirectPath=')) {
       const decoded = decodeURIComponent(next);
-      if (XHS_NOTE_ID.test(decoded) || /xsec_token=/.test(decoded)) return decoded;
+      if (XHS_NOTE_ID.test(decoded) || /xsec_token=/.test(decoded)) {
+        resolved = decoded;
+        break;
+      }
     }
     current = next;
+    resolved = next;
   }
-  return current;
+  // 短链 → 目标地址的映射很稳定，缓存一小时可以省掉每次解析前的 1~2 跳往返
+  if (resolved !== input && (XHS_NOTE_ID.test(resolved) || /xsec_token=/.test(resolved))) {
+    await cacheWrite(cacheKey, { target: resolved }, 3600);
+  }
+  return resolved;
 }
 
 // 小红书互动数返回的是 "1.2万" / "3.4亿" 这类带单位的字符串，直接抽数字会差四个数量级
@@ -507,10 +539,31 @@ export function normalizeXhsNote(note, noteId) {
 }
 
 export async function resolveXiaohongshu(input, env) {
+  const trace = [];
+  // 中转服务偶尔会「返回响应头后卡住 body」，那种情况 await res.text() 会一直挂着，
+  // 请求方只会看到超时且拿不到任何线索，所以整条链路必须有硬超时兜底。
+  const work = xhsPipeline(input, env, trace);
+  // 超时先返回后，pipeline 仍在跑并在稍后 reject，没人接就会变成 unhandled rejection，
+  // Workers 会直接终止请求（502）。先挂一个空 catch 吃掉它的落败结果。
+  work.catch(() => {});
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new ParseError('小红书解析超时，请稍后重试', 'xhs_timeout', 504, `hard_timeout|${trace.join('|')}`)),
+      17000,
+    );
+  });
+  try {
+    return await Promise.race([work, guard]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function xhsPipeline(input, env, trace) {
   let target = input;
   let noteId = (target.match(XHS_NOTE_ID) || [])[1] || '';
   let token = readXsecToken(target);
-  const trace = [];
 
   if (!noteId || !token) {
     try {
@@ -540,31 +593,39 @@ export async function resolveXiaohongshu(input, env) {
   if (cached) return cached;
 
   const attempts = [];
-  const push = (url, ua, tag, group, redirect = 'manual', timeout = 12000) =>
-    attempts.push({ url, ua, tag, group, redirect, timeout });
+  const push = (url, ua, tag, group, redirect = 'manual', timeout = 12000, extraHeaders) =>
+    attempts.push({ url, ua, tag, group, redirect, timeout, extraHeaders });
   const shareUrl = (id) => `https://www.xiaohongshu.com/discovery/item/${id}`;
   const shareQuery = token ? `?xsec_token=${encodeURIComponent(token)}&xsec_source=app_share` : '';
 
-  // 直连只在住宅/本机出口有效，机房 IP 必被 302，所以只试一次，失败就把并发交给转发通道。
-  push(`${shareUrl(noteId)}${shareQuery}`, UA.spider, 'direct', 'direct', 'manual', 7000);
+  // 主用通道：rednote.com 是小红书国际站，同一 noteId 通用，境外机房出口不会被
+  // xiaohongshu.com 的 /website-login/captcha 人机墙拦下，蜘蛛 UA 直接拿到 SSR 数据。
+  if (token) {
+    push(`https://www.rednote.com/discovery/item/${noteId}${shareQuery}`, UA.spider, 'rednote', 'direct', 'manual', 6000);
+    // 同一站点的两条路径有时只有一条吐 SSR（另一条给客户端渲染的空壳），都试一下
+    push(`https://www.rednote.com/explore/${noteId}${shareQuery}`, UA.spider, 'rednote_explore', 'direct', 'manual', 6000);
+  }
+  // 兜底直连：机房 IP 会 302 到登录墙，放后面只作为万一 rednote 不可用时的备用
+  push(`${shareUrl(noteId)}${shareQuery}`, UA.spider, 'direct', 'direct', 'manual', 4000);
   if (token) {
     if (env?.XHS_PROXY) {
       push(`${env.XHS_PROXY}${encodeURIComponent(`${shareUrl(noteId)}${shareQuery}`)}`, UA.desktop, 'own_proxy', 'relay', 'follow', 12000);
     }
     for (const relay of XHS_RELAYS) {
       try {
-        push(relay.build(`${shareUrl(noteId)}${shareQuery}`), UA.desktop, relay.name, 'relay', 'follow', 9000);
+        push(relay.build(`${shareUrl(noteId)}${shareQuery}`), UA.desktop, relay.name, 'relay', 'follow', 3500, relay.headers);
       } catch {
         /* 忽略构造失败的转发通道 */
       }
     }
   }
   // 无 token 的直连只作为兜底：多数情况会 307 到 404，但部分老笔记仍可访问
-  push(`https://www.xiaohongshu.com/explore/${noteId}`, UA.spider, 'expl_bare', 'last', 'manual', 7000);
+  push(`https://www.xiaohongshu.com/explore/${noteId}`, UA.spider, 'expl_bare', 'last', 'manual', 5000);
 
-  const finish = async (result) => {
-    // 图片直链是按时段签名的，缓存时间要短于签名有效期
-    await cacheWrite(cacheKey, result, 240);
+  const finish = (result) => {
+    // 图片直链是按时段签名的，缓存时间要短于签名有效期。
+    // 不 await：写缓存失败不该拖慢响应，响应返回后 worker 仍会把它跑完。
+    cacheWrite(cacheKey, result, 240).catch(() => {});
     return result;
   };
 
@@ -573,7 +634,7 @@ export async function resolveXiaohongshu(input, env) {
     try {
       res = await request(attempt.url, {
         redirect: attempt.redirect,
-        headers: { referer: 'https://www.xiaohongshu.com/', 'user-agent': attempt.ua },
+        headers: { referer: 'https://www.xiaohongshu.com/', 'user-agent': attempt.ua, ...(attempt.extraHeaders || {}) },
         timeout: attempt.timeout,
       });
     } catch (err) {
@@ -581,11 +642,29 @@ export async function resolveXiaohongshu(input, env) {
       return null;
     }
     if (res.status !== 200) {
+      // 不读 body 就必须 cancel，否则这条连接会一直挂着，把整个 Worker 请求拖死
+      try {
+        res.body?.cancel().catch(() => {});
+      } catch {
+        /* 已关闭 */
+      }
       trace.push(`${attempt.tag}:${res.status}`);
       return null;
     }
 
-    const html = await res.text();
+    // res.text() 不受 fetch 的 AbortSignal 保护，卡住时要靠这层兜底
+    let html;
+    try {
+      html = await withTimeout(res.text(), attempt.timeout + 1500);
+    } catch {
+      try {
+        res.body?.cancel().catch(() => {});
+      } catch {
+        /* 已关闭 */
+      }
+      trace.push(`${attempt.tag}:body_timeout`);
+      return null;
+    }
     const state = extractJsonObject(html, ['window.__INITIAL_STATE__']);
     if (!state) {
       trace.push(`${attempt.tag}:200/no_state/len${html.length}`);
@@ -615,22 +694,12 @@ export async function resolveXiaohongshu(input, env) {
     if (result) return finish(result);
   }
 
-  // 转发通道并发跑，谁先拿到数据用谁，避免一个个超时叠加把请求拖到几十秒
+  // 转发通道逐个尝试：并发虽然快，但多个 fetch 挂起时 CF 的定时器会被推迟，
+  // 单次超时形同虚设，实测反而更慢（33s+）。串行每个 5s，最坏也能收在 16s 内。
   const relays = attempts.filter((a) => a.group === 'relay');
-  if (relays.length) {
-    try {
-      const result = await Promise.any(
-        relays.map((a) =>
-          runAttempt(a).then((value) => {
-            if (!value) throw new Error('miss');
-            return value;
-          }),
-        ),
-      );
-      if (result) return finish(result);
-    } catch {
-      /* 全部通道失败，落到下面的兜底与报错 */
-    }
+  for (const attempt of relays) {
+    const result = await runAttempt(attempt);
+    if (result) return finish(result);
   }
 
   for (const attempt of attempts.filter((a) => a.group === 'last')) {

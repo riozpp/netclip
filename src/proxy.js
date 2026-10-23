@@ -21,6 +21,9 @@ const ALLOWED_HOSTS = [
   'xiaohongshu.com',
   'xhscdn.com',
   'sns-video-bd.xhscdn.com',
+  // rednote.com 是小红书国际站，返回的媒体走独立 CDN 域名，不加上会被 403 挡住
+  'rednote.com',
+  'rednotecdn.com',
   'bilibili.com',
   'bilivideo.com',
   'hdslb.com',
@@ -41,6 +44,8 @@ const REFERERS = {
   'tikwm.com': 'https://www.tikwm.com/',
   'xiaohongshu.com': 'https://www.xiaohongshu.com/',
   'xhscdn.com': 'https://www.xiaohongshu.com/',
+  'rednote.com': 'https://www.rednote.com/',
+  'rednotecdn.com': 'https://www.rednote.com/',
   'bilibili.com': 'https://www.bilibili.com/',
   'bilivideo.com': 'https://www.bilibili.com/',
   'hdslb.com': 'https://www.bilibili.com/',

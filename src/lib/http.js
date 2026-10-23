@@ -20,8 +20,9 @@ export class ParseError extends Error {
 
 export async function request(url, options = {}) {
   const { timeout = 12000, headers = {}, ...rest } = options;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  // 用手动 AbortController + setTimeout 时，多个请求并发挂起会让定时器被推迟，
+  // 实际表现是「超时形同虚设、请求拖到 30s 被平台杀掉」，改用原生超时信号。
+  const signal = AbortSignal.timeout(timeout);
   try {
     return await fetch(url, {
       ...rest,
@@ -30,13 +31,13 @@ export async function request(url, options = {}) {
         'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
         ...headers,
       },
-      signal: controller.signal,
+      signal,
     });
   } catch (err) {
-    if (err.name === 'AbortError') throw new ParseError('上游响应超时，请稍后重试', 'upstream_timeout', 504);
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw new ParseError('上游响应超时，请稍后重试', 'upstream_timeout', 504);
+    }
     throw new ParseError('无法连接上游平台，请检查链接或稍后重试', 'upstream_unreachable', 502);
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -93,12 +94,26 @@ export function extractJsonObject(text, markers) {
   return null;
 }
 
+// 只读响应头就返回时必须把 body 关掉。不消费也不 cancel 的响应在 Workers 上
+// 会一直占着连接，表现是「通道 500ms 就出结果，但整个请求要 15s 才返回」。
+export function releaseBody(res) {
+  try {
+    res?.body?.cancel().catch(() => {});
+  } catch {
+    /* 已关闭 */
+  }
+}
+
 export async function expandShortLink(url, { maxHops = 4, headers = {} } = {}) {
   let current = url;
   for (let i = 0; i < maxHops; i += 1) {
     const res = await request(current, { redirect: 'manual', headers, timeout: 9000 });
     const location = res.headers.get('location');
-    if (!location) return current;
+    if (!location) {
+      releaseBody(res);
+      return current;
+    }
+    releaseBody(res);
     current = new URL(location, current).toString();
   }
   return current;

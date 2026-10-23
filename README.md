@@ -136,7 +136,7 @@ routes = [{ pattern = "example.com", custom_domain = true }]
 | `DOUYIN_FALLBACK_API` | 环境变量（可选） | 抖音公开解析通道地址，形如 `https://your-api/dy?url=`，会拼上 URL 编码后的作品链接 |
 | `TIKTOK_FALLBACK_API` | 环境变量（可选） | TikTok 备用通道 |
 | `BILI_PROXY` | 环境变量（可选） | B 站转发前缀，如 `https://your-proxy/?url=`，值会被拼上 URL 编码后的原始地址 |
-| `XHS_PROXY` | 环境变量（可选） | 小红书转发前缀，优先级高于内置中转通道，格式同上 |
+| `XHS_PROXY` | 环境变量（可选） | 小红书转发前缀，格式同上。**已非必需**：默认走 rednote 国际站，此项只在内置通道全部失效时作为最后一道出口 |
 
 ### 域名绑定
 
@@ -157,17 +157,21 @@ workers_dev = true   # 同时保留 <name>.<subdomain>.workers.dev 备用入口
 | --- | --- | --- |
 | 哔哩哔哩 | ✅ 标题 / 作者 / 统计 / 720P 直链 | ⚠️ 接口与网页均返回 412 |
 | 图床 CDN（hdslb） | ✅ 651KB 原图完整取回 | ✅ 代理正常 |
-| 小红书（图文） | ✅ 完整元数据 + 原图 | ✅ 经中转通道 3–5s 返回（直连会被 302） |
+| 小红书（图文 / 视频） | ✅ 完整元数据 + 原图 | ✅ 经 rednote 国际站 1.5–4s 返回（国内站直连会被 302 到人机验证页） |
 
 ### 小红书为什么要特殊处理
 
-小红书现在给每篇笔记加了访问凭证 `xsec_token`，并且对机房 IP 段一律 302 到登录页。所以解析链路是：
+小红书现在给每篇笔记加了访问凭证 `xsec_token`，并且对机房 IP 段一律 302 到 `/website-login/captcha`。所以解析链路是：
 
-1. **短链展开**：`xhslink.cn` / `xhslink.com` 分享短链逐跳展开，从跳转地址里取出 `noteId` 与 `xsec_token`；
-2. **抓 SSR 数据**：请求 `discovery/item/<id>?xsec_token=…`，从 `window.__INITIAL_STATE__` 的 `noteData.data.noteData` 取标题、正文、作者、互动数与图片/视频地址；
-3. **换出口**：Cloudflare 边缘 IP 会被拒（302），因此内置 Google Translate 等中转通道代抓同一页面，另有 `XHS_PROXY` 可接自己的转发服务。
+1. **短链展开**：`xhslink.cn` / `xhslink.com` 分享短链逐跳展开，从跳转地址（或 `redirectPath` 参数解码后）取出 `noteId` 与 `xsec_token`，结果缓存一小时；
+2. **走国际站取数**：请求 `www.rednote.com/discovery/item/<id>?xsec_token=…`。rednote 是小红书国际站，**同一 noteId 在两边通用**，而它对境外机房 IP 不设人机验证墙，配合搜索引擎蜘蛛 UA 可以直接拿到 `window.__INITIAL_STATE__` 的 `noteData.data.noteData`；
+3. **降级**：万一国际站不可用，再依次退到 `xiaohongshu.com` 直连、Google 翻译等中转通道，最后是 `XHS_PROXY` 自建转发。
+
+有个反直觉的细节：中国大陆本机访问 `rednote.com` 会返回 `error_code 300031`（地区限制），但这个域名恰好在境外出口上可用——所以它的可用性只能在 Cloudflare 上验证，不能靠本地测。
 
 浏览器地址栏复制出来的 `xiaohongshu.com/explore/…` **不带 token，必然失败**，必须用 App 里「分享 → 复制链接」得到的短链。
+
+小红书国际站返回的媒体走 `rednotecdn.com`，与国内站的 `xhscdn.com` 不同，两者都已加入下载代理白名单。
 
 B 站的 412 是出口 IP 级别的风控，与代码无关：`api.bilibili.com` 和 `www.bilibili.com` 都会拦 Cloudflare 网段。解法有两种，二选一：
 
@@ -184,7 +188,7 @@ B 站的 412 是出口 IP 级别的风控，与代码无关：`api.bilibili.com`
 | --- | --- | --- | --- |
 | 抖音 | 作品信息接口 | 公开解析通道 → SEO 结构化数据 | 短链先展开；详见表下注 |
 | TikTok | 第三方解析通道 | 备用通道 | 依赖外部服务可用性 |
-| 小红书 | 移动分享页 `noteData`（需 `xsec_token`） | Google 翻译等中转出口 → 蜘蛛 UA | 必须用 App 分享短链；浏览器地址栏链接无 token |
+| 小红书 | 国际站 `rednote.com` 分享页 + 蜘蛛 UA（需 `xsec_token`） | 国际站 `explore` 路径 → 国内站直连 → Google 翻译等中转 → `XHS_PROXY` | 必须用 App 分享短链；浏览器地址栏链接无 token |
 | 哔哩哔哩 | 稿件信息 + 播放地址接口 | — | 高清直链需登录态时会降级为页面信息 |
 | Instagram | 贴文 embed 页 | — | 公共贴文可解析，私密账号不可 |
 
